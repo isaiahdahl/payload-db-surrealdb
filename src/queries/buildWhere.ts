@@ -44,18 +44,22 @@ const operatorToSQL = (field: string, operator: string, value: unknown): string 
   }
 }
 
-export const buildWhere = (where?: Where): string => {
+const buildClause = (where?: Where): string => {
   if (!where || Object.keys(where).length === 0) {
     return ''
   }
 
   const clauses = Object.entries(where).flatMap(([key, value]) => {
     if (key === 'and' && Array.isArray(value)) {
-      return [`(${value.map((entry) => buildWhere(entry as Where).replace(/^WHERE /, '')).join(' AND ')})`]
+      const nested = value.map((entry) => buildClause(entry as Where)).filter(Boolean)
+
+      return nested.length ? [`(${nested.join(' AND ')})`] : []
     }
 
     if (key === 'or' && Array.isArray(value)) {
-      return [`(${value.map((entry) => buildWhere(entry as Where).replace(/^WHERE /, '')).join(' OR ')})`]
+      const nested = value.map((entry) => buildClause(entry as Where)).filter(Boolean)
+
+      return nested.length ? [`(${nested.join(' OR ')})`] : []
     }
 
     if (value && typeof value === 'object' && !Array.isArray(value)) {
@@ -67,5 +71,11 @@ export const buildWhere = (where?: Where): string => {
     return [`${pathToSQL(key)} = ${valueToSQL(value)}`]
   })
 
-  return clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''
+  return clauses.filter(Boolean).join(' AND ')
+}
+
+export const buildWhere = (where?: Where): string => {
+  const clause = buildClause(where)
+
+  return clause ? `WHERE ${clause}` : ''
 }

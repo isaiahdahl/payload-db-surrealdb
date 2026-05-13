@@ -3,7 +3,7 @@ import path from 'path'
 import { buildConfig } from 'payload'
 import { fileURLToPath } from 'url'
 import sharp from 'sharp'
-import { surrealAdapter } from 'payload-db-surrealdb'
+import { surrealAdapter } from '../../../dist/index.js'
 
 import { Users } from './collections/Users'
 import { Posts } from './collections/Posts'

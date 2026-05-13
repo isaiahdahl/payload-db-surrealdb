@@ -36,21 +36,27 @@ const operatorToSQL = (field, operator, value) => {
             return `${path} = ${valueToSQL(value)}`;
     }
 };
-export const buildWhere = (where) => {
+const buildClause = (where) => {
     if (!where || Object.keys(where).length === 0) {
         return '';
     }
     const clauses = Object.entries(where).flatMap(([key, value]) => {
         if (key === 'and' && Array.isArray(value)) {
-            return [`(${value.map((entry) => buildWhere(entry).replace(/^WHERE /, '')).join(' AND ')})`];
+            const nested = value.map((entry) => buildClause(entry)).filter(Boolean);
+            return nested.length ? [`(${nested.join(' AND ')})`] : [];
         }
         if (key === 'or' && Array.isArray(value)) {
-            return [`(${value.map((entry) => buildWhere(entry).replace(/^WHERE /, '')).join(' OR ')})`];
+            const nested = value.map((entry) => buildClause(entry)).filter(Boolean);
+            return nested.length ? [`(${nested.join(' OR ')})`] : [];
         }
         if (value && typeof value === 'object' && !Array.isArray(value)) {
             return Object.entries(value).map(([operator, operatorValue]) => operatorToSQL(key, operator, operatorValue));
         }
         return [`${pathToSQL(key)} = ${valueToSQL(value)}`];
     });
-    return clauses.length ? `WHERE ${clauses.join(' AND ')}` : '';
+    return clauses.filter(Boolean).join(' AND ');
+};
+export const buildWhere = (where) => {
+    const clause = buildClause(where);
+    return clause ? `WHERE ${clause}` : '';
 };
