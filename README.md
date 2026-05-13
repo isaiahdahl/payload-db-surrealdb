@@ -95,8 +95,19 @@ Open:
 - Frontend: http://localhost:3010
 - Admin: http://localhost:3010/admin
 - REST API: http://localhost:3010/api/posts
+- Surrealist DB UI: http://localhost:8080
 
 Create the first admin user from `/admin`, then create posts in the `posts` collection. The homepage and REST API read through this adapter.
+
+Surrealist connection details:
+
+```txt
+Endpoint:  http://localhost:8000
+Username:  root
+Password:  root
+Namespace: payload_demo
+Database:  payload_demo
+```
 
 ## Development smoke test
 

@@ -4,3 +4,10 @@ services:
     command: start --user root --pass root memory
     ports:
       - "8000:8000"
+
+  surrealist:
+    image: surrealdb/surrealist:latest
+    depends_on:
+      - surrealdb
+    ports:
+      - "8080:8080"
