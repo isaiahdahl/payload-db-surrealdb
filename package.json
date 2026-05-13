@@ -1,6 +1,6 @@
 {
   "name": "payload-db-surrealdb",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Experimental alpha Payload CMS database adapter for SurrealDB.",
   "type": "module",
   "main": "dist/index.js",
@@ -14,6 +14,7 @@
   },
   "files": [
     "dist",
+    "examples/basic",
     "README.md",
     "LICENSE"
   ],
