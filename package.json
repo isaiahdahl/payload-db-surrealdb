@@ -1,0 +1,56 @@
+{
+  "name": "payload-db-surrealdb",
+  "version": "0.1.0",
+  "description": "Experimental alpha Payload CMS database adapter for SurrealDB.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "clean": "rm -rf dist",
+    "prepack": "npm run clean && npm run build",
+    "smoke": "npm run build && node smoke.mjs"
+  },
+  "keywords": [
+    "payload",
+    "payloadcms",
+    "surrealdb",
+    "database-adapter",
+    "cms"
+  ],
+  "author": "Isaiah Dahl",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/IsaiahDahl/payload-db-surrealdb.git"
+  },
+  "bugs": {
+    "url": "https://github.com/IsaiahDahl/payload-db-surrealdb/issues"
+  },
+  "homepage": "https://github.com/IsaiahDahl/payload-db-surrealdb#readme",
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "payload": ">=3.0.0 || >=4.0.0-beta.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3"
+  },
+  "publishConfig": {
+    "access": "public",
+    "tag": "alpha"
+  }
+}

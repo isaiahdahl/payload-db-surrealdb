@@ -1,0 +1,11 @@
+import type { CountGlobalVersions, CountVersions, CreateGlobalVersion, CreateVersion, DeleteVersions, FindGlobalVersions, FindVersions, QueryDrafts, UpdateGlobalVersion, UpdateVersion } from 'payload';
+export declare const createVersion: CreateVersion;
+export declare const createGlobalVersion: CreateGlobalVersion;
+export declare const findVersions: FindVersions;
+export declare const findGlobalVersions: FindGlobalVersions;
+export declare const countVersions: CountVersions;
+export declare const countGlobalVersions: CountGlobalVersions;
+export declare const deleteVersions: DeleteVersions;
+export declare const updateVersion: UpdateVersion;
+export declare const updateGlobalVersion: UpdateGlobalVersion;
+export declare const queryDrafts: QueryDrafts;

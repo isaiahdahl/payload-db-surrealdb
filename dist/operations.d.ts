@@ -1,0 +1,10 @@
+import type { Count, Create, DeleteMany, DeleteOne, Find, FindOne, UpdateMany, UpdateOne, Upsert } from 'payload';
+export declare const create: Create;
+export declare const findOne: FindOne;
+export declare const find: Find;
+export declare const count: Count;
+export declare const updateOne: UpdateOne;
+export declare const updateMany: UpdateMany;
+export declare const deleteOne: DeleteOne;
+export declare const deleteMany: DeleteMany;
+export declare const upsert: Upsert;
