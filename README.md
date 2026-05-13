@@ -78,6 +78,26 @@ This is not production ready. Major missing/incomplete areas:
 - full Payload test-suite parity
 - performance/concurrency validation
 
+## Demo app
+
+A minimal Payload + Next demo app lives in [`examples/basic`](./examples/basic).
+
+```bash
+cd examples/basic
+cp .env.example .env
+docker compose up -d
+npm install
+npm run dev -- -p 3010
+```
+
+Open:
+
+- Frontend: http://localhost:3010
+- Admin: http://localhost:3010/admin
+- REST API: http://localhost:3010/api/posts
+
+Create the first admin user from `/admin`, then create posts in the `posts` collection. The homepage and REST API read through this adapter.
+
 ## Development smoke test
 
 ```bash

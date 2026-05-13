@@ -1,0 +1,36 @@
+{
+  "name": "payload-surrealdb-basic-demo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "cross-env NODE_OPTIONS=--no-deprecation next dev",
+    "build": "cross-env NODE_OPTIONS=--no-deprecation next build",
+    "start": "cross-env NODE_OPTIONS=--no-deprecation next start",
+    "payload": "cross-env NODE_OPTIONS=--no-deprecation payload",
+    "generate:importmap": "cross-env NODE_OPTIONS=--no-deprecation payload generate:importmap",
+    "generate:types": "cross-env NODE_OPTIONS=--no-deprecation payload generate:types"
+  },
+  "dependencies": {
+    "@payloadcms/next": "3.84.1",
+    "@payloadcms/richtext-lexical": "3.84.1",
+    "@payloadcms/ui": "3.84.1",
+    "cross-env": "10.1.0",
+    "graphql": "^16.8.1",
+    "next": "16.2.6",
+    "payload": "3.84.1",
+    "payload-db-surrealdb": "^0.1.0",
+    "react": "19.2.6",
+    "react-dom": "19.2.6",
+    "sharp": "0.34.2"
+  },
+  "devDependencies": {
+    "@types/node": "24.12.3",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "typescript": "5.7.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
