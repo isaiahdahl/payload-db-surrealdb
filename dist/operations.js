@@ -262,8 +262,18 @@ const getFieldStorageName = (field) => {
 };
 const collapseLocalizedValues = (value, fields = []) => {
     for (const field of fields) {
+        if (!field.name) {
+            if (Array.isArray(field.fields)) {
+                collapseLocalizedValues(value, field.fields);
+            }
+            if (Array.isArray(field.tabs)) {
+                for (const tab of field.tabs)
+                    collapseLocalizedValues(value, tab.fields ?? []);
+            }
+            continue;
+        }
         const storageName = getFieldStorageName(field);
-        if (!field.name || !storageName)
+        if (!storageName)
             continue;
         if (storageName !== field.name && value[field.name] === undefined && value[storageName] !== undefined) {
             value[field.name] = value[storageName];
@@ -313,8 +323,6 @@ const applyReadTransforms = (adapter, collection, docs) => {
     const normalized = (idField?.type === 'number' || customIDType === 'number' || collection.endsWith('-number'))
         ? docs.map((doc) => ({ ...doc, id: typeof doc.id === 'string' && !Number.isNaN(Number(doc.id)) ? Number(doc.id) : doc.id }))
         : docs;
-    if (collection !== 'custom-schema')
-        return normalized;
     return normalized.map((doc) => collapseEnglishLocaleObjects(collapseLocalizedValues(doc, fields)));
 };
 const getDepth = (args) => typeof args.depth === 'number' ? args.depth : 0;
@@ -546,7 +554,8 @@ export const create = async function create(args) {
     const target = getRecordID(table, resolvedID);
     const statement = `CREATE ${target} CONTENT ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
     if (await queueTransactionStatement(this, args.req, statement)) {
-        return shouldReturn ? applySelect(normalizeDocument({ ...data, id: resolvedID }), args.select) : null;
+        const docs = applyReadTransforms(this, args.collection, [applySelect(normalizeDocument({ ...data, id: resolvedID }), args.select)]);
+        return shouldReturn ? docs[0] ?? null : null;
     }
     try {
         const result = await this.client.query(statement);
@@ -714,7 +723,8 @@ export const updateOne = async function updateOne(args) {
         const updateContent = Object.keys(dottedData).length ? { ...existingDoc, ...data, id: args.id } : data;
         const statement = `UPDATE ${getRecordID(table, args.id)} ${Object.keys(dottedData).length ? 'CONTENT' : 'MERGE'} ${literal(updateContent)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
         if (await queueTransactionStatement(this, args.req, statement)) {
-            return shouldReturn ? applySelect(normalizeDocument({ ...existingDoc, ...data, id: args.id }), args.select) : null;
+            const docs = applyReadTransforms(this, args.collection, [applySelect(normalizeDocument({ ...existingDoc, ...data, id: args.id }), args.select)]);
+            return shouldReturn ? docs[0] ?? null : null;
         }
         try {
             const result = await this.client.query(statement);
@@ -735,7 +745,8 @@ export const updateOne = async function updateOne(args) {
     const updateContent = Object.keys(dottedData).length ? { ...found, ...data } : data;
     const statement = `UPDATE ${getRecordID(table, found.id)} ${Object.keys(dottedData).length ? 'CONTENT' : 'MERGE'} ${literal(updateContent)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
     if (await queueTransactionStatement(this, args.req, statement)) {
-        return shouldReturn ? applySelect(normalizeDocument({ ...found, ...data }), args.select) : null;
+        const docs = applyReadTransforms(this, args.collection, [applySelect(normalizeDocument({ ...found, ...data }), args.select)]);
+        return shouldReturn ? docs[0] ?? null : null;
     }
     try {
         const result = await this.client.query(statement);

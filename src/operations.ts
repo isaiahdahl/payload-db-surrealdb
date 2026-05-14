@@ -308,8 +308,18 @@ const getFieldStorageName = (field: any): string | undefined => {
 
 const collapseLocalizedValues = (value: Record<string, unknown>, fields: any[] = []): Record<string, unknown> => {
   for (const field of fields) {
+    if (!field.name) {
+      if (Array.isArray(field.fields)) {
+        collapseLocalizedValues(value, field.fields)
+      }
+      if (Array.isArray(field.tabs)) {
+        for (const tab of field.tabs) collapseLocalizedValues(value, tab.fields ?? [])
+      }
+      continue
+    }
+
     const storageName = getFieldStorageName(field)
-    if (!field.name || !storageName) continue
+    if (!storageName) continue
 
     if (storageName !== field.name && value[field.name] === undefined && value[storageName] !== undefined) {
       value[field.name] = value[storageName]
@@ -365,7 +375,6 @@ const applyReadTransforms = (adapter: SurrealAdapter, collection: string, docs: 
     ? docs.map((doc) => ({ ...doc, id: typeof doc.id === 'string' && !Number.isNaN(Number(doc.id)) ? Number(doc.id) : doc.id }))
     : docs
 
-  if (collection !== 'custom-schema') return normalized
   return normalized.map((doc) => collapseEnglishLocaleObjects(collapseLocalizedValues(doc, fields)) as Record<string, unknown>)
 }
 
@@ -632,7 +641,8 @@ export const create: Create = async function create(this: SurrealAdapter, args) 
   const statement = `CREATE ${target} CONTENT ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
 
   if (await queueTransactionStatement(this, args.req, statement)) {
-    return shouldReturn ? applySelect(normalizeDocument({ ...data, id: resolvedID }), args.select) : null
+    const docs = applyReadTransforms(this, args.collection, [applySelect(normalizeDocument({ ...data, id: resolvedID }), args.select) as Record<string, unknown>])
+    return shouldReturn ? docs[0] ?? null : null
   }
 
   try {
@@ -830,7 +840,8 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
     const statement = `UPDATE ${getRecordID(table, args.id)} ${Object.keys(dottedData).length ? 'CONTENT' : 'MERGE'} ${literal(updateContent)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
 
     if (await queueTransactionStatement(this, args.req, statement)) {
-      return shouldReturn ? applySelect(normalizeDocument({ ...existingDoc, ...data, id: args.id }), args.select) : null
+      const docs = applyReadTransforms(this, args.collection, [applySelect(normalizeDocument({ ...existingDoc, ...data, id: args.id }), args.select) as Record<string, unknown>])
+      return shouldReturn ? docs[0] ?? null : null
     }
 
     try {
@@ -857,7 +868,8 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
   const statement = `UPDATE ${getRecordID(table, found.id)} ${Object.keys(dottedData).length ? 'CONTENT' : 'MERGE'} ${literal(updateContent)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
 
   if (await queueTransactionStatement(this, args.req, statement)) {
-    return shouldReturn ? applySelect(normalizeDocument({ ...found, ...data }), args.select) : null
+    const docs = applyReadTransforms(this, args.collection, [applySelect(normalizeDocument({ ...found, ...data }), args.select) as Record<string, unknown>])
+    return shouldReturn ? docs[0] ?? null : null
   }
 
   try {

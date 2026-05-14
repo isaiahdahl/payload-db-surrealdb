@@ -40,6 +40,8 @@ const isRetryableConflict = (value: unknown): boolean => {
 
 const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
 
+const nativeFetch = globalThis.fetch.bind(globalThis)
+
 const parseJSON = async (response: Response): Promise<SurrealHTTPResult[]> => {
   const text = await response.text()
 
@@ -69,7 +71,7 @@ export const createClient = (adapter: SurrealAdapter): SurrealClient => {
 
         let response: Response
         try {
-          response = await fetch(endpoint, {
+          response = await nativeFetch(endpoint, {
             body: sql,
             headers: {
               Accept: 'application/json',

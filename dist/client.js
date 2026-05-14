@@ -21,6 +21,7 @@ const isRetryableConflict = (value) => {
     return /transaction conflict|write conflict|can be retried/i.test(message);
 };
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const nativeFetch = globalThis.fetch.bind(globalThis);
 const parseJSON = async (response) => {
     const text = await response.text();
     try {
@@ -46,7 +47,7 @@ export const createClient = (adapter) => {
                 const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? adapter.requestTimeoutMs ?? 30_000);
                 let response;
                 try {
-                    response = await fetch(endpoint, {
+                    response = await nativeFetch(endpoint, {
                         body: sql,
                         headers: {
                             Accept: 'application/json',
