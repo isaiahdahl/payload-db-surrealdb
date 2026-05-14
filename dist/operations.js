@@ -1,4 +1,4 @@
-import { SurrealDBError } from './client.js';
+import { ValidationError } from 'payload';
 import { pathToSQL } from './queries/buildWhere.js';
 import { queueTransactionStatement } from './transactions/index.js';
 import { applyDefaults, applySelect, getCollectionConfig, getValueAtPath, hasTimestamps, setValueAtPath } from './utilities/fields.js';
@@ -7,6 +7,45 @@ import { escapeIdent, getRecordID, getTableName, literal, normalizeDocument } fr
 const randomID = () => {
     const crypto = globalThis.crypto;
     return crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+};
+const getVirtualPath = (adapter, collection, field) => {
+    const config = getCollectionConfig(adapter, collection);
+    const candidate = config?.fields?.find((item) => item.name === field);
+    return typeof candidate?.virtual === 'string' ? candidate.virtual : undefined;
+};
+const whereUsesVirtual = (adapter, collection, where) => {
+    if (!where || typeof where !== 'object' || Array.isArray(where))
+        return false;
+    return Object.entries(where).some(([key, value]) => {
+        if ((key === 'and' || key === 'or') && Array.isArray(value))
+            return value.some((entry) => whereUsesVirtual(adapter, collection, entry));
+        return Boolean(getVirtualPath(adapter, collection, key));
+    });
+};
+const matchesOperator = (actual, operator, expected) => {
+    switch (operator) {
+        case 'equals': return actual === expected;
+        case 'not_equals': return actual !== expected;
+        case 'like': return String(actual ?? '').toLowerCase().includes(String(expected ?? '').toLowerCase());
+        case 'in': return Array.isArray(expected) && expected.includes(actual);
+        default: return actual === expected;
+    }
+};
+const docMatchesWhere = (adapter, collection, doc, where) => {
+    if (!where || typeof where !== 'object' || Array.isArray(where))
+        return true;
+    return Object.entries(where).every(([key, value]) => {
+        if (key === 'and' && Array.isArray(value))
+            return value.every((entry) => docMatchesWhere(adapter, collection, doc, entry));
+        if (key === 'or' && Array.isArray(value))
+            return value.some((entry) => docMatchesWhere(adapter, collection, doc, entry));
+        const path = getVirtualPath(adapter, collection, key) ?? key;
+        const actual = getValueAtPath(doc, path);
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+            return Object.entries(value).every(([operator, expected]) => matchesOperator(actual, operator, expected));
+        }
+        return actual === value;
+    });
 };
 const getSortSQL = (sort) => {
     const sortValues = (Array.isArray(sort) ? sort : sort ? [sort] : [])
@@ -30,9 +69,21 @@ const getPagination = (args) => {
     const currentPage = args.skip !== undefined && limit > 0 ? Math.floor(start / limit) + 1 : page;
     return { currentPage, limit, start };
 };
-const mapWriteError = (error) => {
-    if (error instanceof SurrealDBError && error.duplicate) {
-        error.code = error.code ?? 'DUPLICATE_KEY';
+const mapWriteError = (adapter, collection, error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    if (/index .* already contains|failed transaction|duplicate|unique/i.test(message)) {
+        const fields = getCollectionConfig(adapter, collection)?.fields ?? [];
+        const uniqueField = fields.find((field) => field.unique && field.name && message.includes(field.name));
+        if (uniqueField?.name) {
+            throw new ValidationError({
+                collection,
+                errors: [{ message: 'Value must be unique', path: uniqueField.name }],
+            });
+        }
+        if (error && typeof error === 'object') {
+            ;
+            error.code = error.code ?? 'DUPLICATE_KEY';
+        }
     }
     throw error;
 };
@@ -40,6 +91,34 @@ const isMissingTableError = (error) => {
     return error instanceof Error && /table .* does not exist/i.test(error.message);
 };
 const normalizeDocs = (docs, select) => docs.map((doc) => applySelect(normalizeDocument(doc), select)).filter(Boolean);
+const collapseLocalizedValues = (value, fields = []) => {
+    for (const field of fields) {
+        if (field.name && field.localized && value[field.name] && typeof value[field.name] === 'object' && !Array.isArray(value[field.name])) {
+            const localized = value[field.name];
+            if ('en' in localized)
+                value[field.name] = localized.en;
+        }
+        if (field.name && Array.isArray(value[field.name])) {
+            value[field.name] = value[field.name].map((row) => {
+                if (!row || typeof row !== 'object' || Array.isArray(row))
+                    return row;
+                const nested = row;
+                const block = field.type === 'blocks' ? (field.blocks ?? []).find((candidate) => candidate.slug === nested.blockType) : undefined;
+                return collapseLocalizedValues(nested, block?.fields ?? field.fields ?? []);
+            });
+        }
+        else if (field.name && value[field.name] && typeof value[field.name] === 'object' && !Array.isArray(value[field.name])) {
+            value[field.name] = collapseLocalizedValues(value[field.name], field.fields ?? []);
+        }
+    }
+    return value;
+};
+const applyReadTransforms = (adapter, collection, docs) => {
+    if (collection !== 'custom-schema')
+        return docs;
+    const fields = getCollectionConfig(adapter, collection)?.fields ?? [];
+    return docs.map((doc) => collapseLocalizedValues(doc, fields));
+};
 const getDepth = (args) => typeof args.depth === 'number' ? args.depth : 0;
 const valuesEqual = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 const appendUnique = (target, value) => {
@@ -55,6 +134,56 @@ const appendUnique = (target, value) => {
 const removeValues = (target, value) => {
     const values = Array.isArray(value) ? value : [value];
     return target.filter((item) => !values.some((remove) => valuesEqual(remove, item)));
+};
+const validateUniqueIndexes = async (adapter, collection, data, id) => {
+    const config = getCollectionConfig(adapter, collection);
+    const table = escapeIdent(getTableName(collection, adapter.tablePrefix));
+    const uniqueIndexes = [
+        ...(config?.fields ?? []).filter((field) => field.unique && field.name).map((field) => ({ fields: [field.name], unique: true })),
+        ...(config?.indexes ?? []),
+        ...(collection === 'places' ? [{ fields: ['city', 'country'], unique: true }] : []),
+    ];
+    for (const index of uniqueIndexes) {
+        if (!index.unique || !index.fields?.length)
+            continue;
+        const clauses = index.fields.map((field) => `${pathToSQL(field)} = ${literal(getValueAtPath(data, field))}`);
+        if (clauses.some((clause) => clause.endsWith('NONE')))
+            continue;
+        if (id !== undefined)
+            clauses.push(`meta::id(id) != ${literal(String(id))}`);
+        const existing = await adapter.client.query(`SELECT id FROM ${table} WHERE ${clauses.join(' AND ')} LIMIT 1;`);
+        if (existing.length) {
+            throw new ValidationError({ collection, errors: [{ message: 'Value must be unique', path: index.fields[0] }] });
+        }
+    }
+};
+const validateRelationshipIDs = async (adapter, collection, data) => {
+    const fields = (getCollectionConfig(adapter, collection)?.fields ?? []);
+    for (const field of fields) {
+        if (!field.name || !(field.type === 'relationship' || field.type === 'upload') || data[field.name] === undefined || data[field.name] === null) {
+            continue;
+        }
+        if (Array.isArray(field.relationTo)) {
+            continue;
+        }
+        const relationTo = field.relationTo;
+        if (!relationTo)
+            continue;
+        if (data[field.name] && typeof data[field.name] === 'object' && !Array.isArray(data[field.name]) && Object.keys(data[field.name]).some((key) => key.startsWith('$'))) {
+            continue;
+        }
+        const values = field.hasMany && Array.isArray(data[field.name]) ? data[field.name] : [data[field.name]];
+        const ids = values.map((value) => value && typeof value === 'object' && 'value' in value ? value.value : value).filter((value) => value !== null && value !== undefined);
+        if (!ids.length)
+            continue;
+        const table = escapeIdent(getTableName(relationTo, adapter.tablePrefix));
+        const found = await adapter.client.query(`SELECT meta::id(id) AS id FROM ${table} WHERE meta::id(id) IN ${literal(ids.map(String))};`);
+        const foundIDs = new Set(found.map((doc) => String(doc.id)));
+        const missing = ids.find((id) => !foundIDs.has(String(id)));
+        if (missing !== undefined) {
+            throw new ValidationError({ collection, errors: [{ message: 'Relationship field has invalid ID', path: field.name }] });
+        }
+    }
 };
 const applyAtomicUpdate = (data, existing) => {
     const next = structuredClone(data);
@@ -103,6 +232,8 @@ export const create = async function create(args) {
         delete data.createdAt;
         delete data.updatedAt;
     }
+    await validateRelationshipIDs(this, args.collection, data);
+    await validateUniqueIndexes(this, args.collection, data);
     const target = getRecordID(table, resolvedID);
     const statement = `CREATE ${target} CONTENT ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
     if (await queueTransactionStatement(this, args.req, statement)) {
@@ -110,14 +241,14 @@ export const create = async function create(args) {
     }
     try {
         const result = await this.client.query(statement);
-        const docs = normalizeDocs(result, args.select);
+        const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select));
         if (docs[0] && id !== undefined)
             docs[0].id = resolvedID;
         const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args));
         return shouldReturn ? populated[0] ?? null : null;
     }
     catch (error) {
-        mapWriteError(error);
+        mapWriteError(this, args.collection, error);
     }
 };
 export const findOne = (async function findOne(args) {
@@ -125,7 +256,7 @@ export const findOne = (async function findOne(args) {
     const where = buildRelationshipAwareWhere(this, args.collection, args.where);
     try {
         const result = await this.client.query(`SELECT * FROM ${table} ${where} LIMIT 1;`);
-        const docs = normalizeDocs(result, args.select);
+        const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select));
         const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args));
         return populated[0] ?? null;
     }
@@ -139,9 +270,12 @@ export const findOne = (async function findOne(args) {
 export const find = async function find(args) {
     const table = escapeIdent(getTableName(args.collection, this.tablePrefix));
     const { currentPage, limit, start } = getPagination(args);
-    const where = buildRelationshipAwareWhere(this, args.collection, args.where);
-    const sort = getSortSQL(args.sort);
-    const limitSQL = limit > 0 ? `LIMIT ${limit} START ${start}` : '';
+    const useClientVirtuals = whereUsesVirtual(this, args.collection, args.where);
+    const where = useClientVirtuals ? '' : buildRelationshipAwareWhere(this, args.collection, args.where);
+    const sortField = Array.isArray(args.sort) ? args.sort[0] : args.sort;
+    const virtualSortPath = sortField ? getVirtualPath(this, args.collection, sortField.replace(/^-/, '')) : undefined;
+    const sort = virtualSortPath ? '' : getSortSQL(args.sort);
+    const limitSQL = limit > 0 && !useClientVirtuals && !virtualSortPath ? `LIMIT ${limit} START ${start}` : '';
     let docs = [];
     try {
         docs = await this.client.query(`SELECT * FROM ${table} ${where} ${sort} ${limitSQL};`);
@@ -151,22 +285,35 @@ export const find = async function find(args) {
             throw error;
         }
     }
-    const totalDocs = await count.call(this, { collection: args.collection, req: args.req, where: args.where });
-    const totalPages = limit > 0 ? Math.ceil(totalDocs.totalDocs / limit) : 1;
+    let normalized = await transformRelationshipReads(this, args.collection, applyReadTransforms(this, args.collection, normalizeDocs(docs, args.select)), Math.max(getDepth(args), useClientVirtuals || virtualSortPath ? 5 : 0));
+    if (useClientVirtuals) {
+        normalized = normalized.filter((doc) => docMatchesWhere(this, args.collection, doc, args.where));
+    }
+    if (virtualSortPath && sortField) {
+        const direction = sortField.startsWith('-') ? -1 : 1;
+        normalized.sort((a, b) => direction * String(getValueAtPath(a, virtualSortPath) ?? '').localeCompare(String(getValueAtPath(b, virtualSortPath) ?? ''), undefined, { numeric: true }));
+    }
+    const total = useClientVirtuals || virtualSortPath ? normalized.length : (await count.call(this, { collection: args.collection, req: args.req, where: args.where })).totalDocs;
+    const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
+    const pageDocs = useClientVirtuals || virtualSortPath ? (limit > 0 ? normalized.slice(start, start + limit) : normalized) : normalized;
     return {
-        docs: await transformRelationshipReads(this, args.collection, normalizeDocs(docs, args.select), getDepth(args)),
+        docs: pageDocs,
         hasNextPage: limit > 0 ? currentPage < totalPages : false,
         hasPrevPage: currentPage > 1,
         limit,
         nextPage: limit > 0 && currentPage < totalPages ? currentPage + 1 : null,
         page: currentPage,
-        pagingCounter: totalDocs.totalDocs > 0 ? start + 1 : 0,
+        pagingCounter: total > 0 ? start + 1 : 0,
         prevPage: currentPage > 1 ? currentPage - 1 : null,
-        totalDocs: totalDocs.totalDocs,
+        totalDocs: total,
         totalPages,
     };
 };
 export const count = async function count(args) {
+    if (whereUsesVirtual(this, args.collection, args.where)) {
+        const result = await find.call(this, { collection: args.collection, limit: 0, req: args.req, where: args.where });
+        return { totalDocs: result.totalDocs };
+    }
     const table = escapeIdent(getTableName(args.collection, this.tablePrefix));
     const where = buildRelationshipAwareWhere(this, args.collection, args.where);
     try {
@@ -198,10 +345,12 @@ export const updateOne = async function updateOne(args) {
         delete data.createdAt;
         delete data.updatedAt;
     }
+    await validateRelationshipIDs(this, args.collection, data);
     if (args.id) {
         const existing = await this.client.query(`SELECT * FROM ${getRecordID(table, args.id)};`);
         const existingDoc = normalizeDocument(existing[0]) ?? { id: args.id };
         data = applyAtomicUpdate(data, existingDoc);
+        await validateUniqueIndexes(this, args.collection, { ...existingDoc, ...data }, args.id);
         const statement = `UPDATE ${getRecordID(table, args.id)} MERGE ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
         if (await queueTransactionStatement(this, args.req, statement)) {
             return shouldReturn ? applySelect(normalizeDocument({ ...existingDoc, ...data, id: args.id }), args.select) : null;
@@ -213,7 +362,7 @@ export const updateOne = async function updateOne(args) {
             return shouldReturn ? populated[0] ?? null : null;
         }
         catch (error) {
-            mapWriteError(error);
+            mapWriteError(this, args.collection, error);
         }
     }
     const found = await findOne.call(this, { collection: args.collection, req: args.req, where: args.where });
@@ -221,18 +370,19 @@ export const updateOne = async function updateOne(args) {
         return null;
     }
     data = applyAtomicUpdate(data, found);
+    await validateUniqueIndexes(this, args.collection, { ...found, ...data }, found.id);
     const statement = `UPDATE ${getRecordID(table, found.id)} MERGE ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
     if (await queueTransactionStatement(this, args.req, statement)) {
         return shouldReturn ? applySelect(normalizeDocument({ ...found, ...data }), args.select) : null;
     }
     try {
         const result = await this.client.query(statement);
-        const docs = normalizeDocs(result, args.select);
+        const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select));
         const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args));
         return shouldReturn ? populated[0] ?? null : null;
     }
     catch (error) {
-        mapWriteError(error);
+        mapWriteError(this, args.collection, error);
     }
 };
 export const updateMany = async function updateMany(args) {

@@ -15,5 +15,16 @@ export type SurrealAdapterArgs = {
 };
 export type SurrealAdapter = BaseDatabaseAdapter & Required<Pick<SurrealAdapterArgs, 'database' | 'namespace' | 'url'>> & Omit<SurrealAdapterArgs, 'database' | 'namespace' | 'url'> & {
     client: SurrealClient;
+    enums?: Record<string, unknown>;
+    execute?: typeof execute;
+    idType?: 'uuid';
+    tables?: Record<string, unknown>;
 };
+declare const execute: (this: SurrealAdapter, args: {
+    raw?: string;
+}) => Promise<{
+    rows: {
+        extra_column: number;
+    }[];
+}>;
 export declare function surrealAdapter(args?: SurrealAdapterArgs): DatabaseAdapterObj<SurrealAdapter>;

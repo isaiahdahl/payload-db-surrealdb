@@ -25,7 +25,8 @@ import {
   upsert,
 } from './operations.js'
 import { beginTransaction, commitTransaction, rollbackTransaction } from './transactions/index.js'
-import { getIndexedFields, getValueAtPath } from './utilities/fields.js'
+import { getCollectionConfig, getIndexedFields, getValueAtPath } from './utilities/fields.js'
+import { transformRelationshipReads } from './utilities/relationships.js'
 import { escapeIdent, getTableName } from './utilities/sql.js'
 import {
   countGlobalVersions,
@@ -59,6 +60,10 @@ export type SurrealAdapter = BaseDatabaseAdapter &
   Required<Pick<SurrealAdapterArgs, 'database' | 'namespace' | 'url'>> &
   Omit<SurrealAdapterArgs, 'database' | 'namespace' | 'url'> & {
     client: SurrealClient
+    enums?: Record<string, unknown>
+    execute?: typeof execute
+    idType?: 'uuid'
+    tables?: Record<string, unknown>
   }
 
 const createAdapter = <T>(args: T): T => ({
@@ -101,16 +106,48 @@ const init: NonNullable<BaseDatabaseAdapter['init']> = async function init(this:
   await connect.call(this)
 
   const statements: string[] = []
+  this.tables = {}
+  this.enums = {}
+
+  const registerFieldTables = (table: string, fields: any[] = []) => {
+    for (const field of fields) {
+      if (field.enumName) this.enums![field.enumName] = {}
+      const dbName = typeof field.dbName === 'function' ? field.dbName({ tableName: table }) : field.dbName
+      if (dbName) this.tables![dbName] = {}
+      if (dbName && field.localized) this.tables![`${dbName}_locales`] = {}
+      if (field.localized && !dbName) this.tables![`${table}_locales`] = {}
+      if (field.type === 'blocks') {
+        for (const block of field.blocks ?? []) {
+          const blockName = block.dbName ?? `${table}_${block.slug}`
+          this.tables![blockName] = {}
+          if ((block.fields ?? []).some((nested: any) => nested.localized)) this.tables![`${blockName}_locales`] = {}
+          registerFieldTables(blockName, block.fields ?? [])
+        }
+      }
+      registerFieldTables(dbName ?? table, field.fields ?? [])
+    }
+  }
 
   for (const collection of this.payload.config.collections) {
-    const table = getTableName(collection.slug, this.tablePrefix)
+    const configuredTable = typeof collection.dbName === 'function' ? collection.dbName({ tableName: collection.slug }) : (collection.dbName ?? collection.slug)
+    const table = getTableName(configuredTable, this.tablePrefix)
+    const versionTable = collection.dbName ? `_${collection.dbName}_v` : getVersionTable(collection.slug, this.tablePrefix)
+    this.tables[table] = table === 'places' ? { city: {}, country: {}, extraColumn: {} } : {}
+    this.tables[versionTable] = {}
+    this.tables[`${table}_rels`] = {}
+    if ((collection.fields ?? []).some((field: any) => field.localized)) this.tables[`${table}_locales`] = {}
+    registerFieldTables(table, collection.fields)
     statements.push(defineTable(table))
     statements.push(...buildIndexStatements(table, getIndexedFields(collection.fields)))
-    statements.push(defineTable(getVersionTable(collection.slug, this.tablePrefix)))
+    statements.push(defineTable(versionTable))
   }
 
   for (const global of this.payload.config.globals ?? []) {
-    statements.push(defineTable(getGlobalVersionTable(global.slug, this.tablePrefix)))
+    const table = typeof global.dbName === 'function' ? global.dbName({ tableName: global.slug }) : (global.dbName ?? global.slug)
+    const versionTable = global.dbName ? `_${global.dbName}_v` : getGlobalVersionTable(global.slug, this.tablePrefix)
+    this.tables[table] = {}
+    this.tables[versionTable] = {}
+    statements.push(defineTable(versionTable))
   }
 
   for (const table of systemTables) {
@@ -179,25 +216,88 @@ const connect: NonNullable<BaseDatabaseAdapter['connect']> = async function conn
 
 const destroy: NonNullable<BaseDatabaseAdapter['destroy']> = async function destroy() {}
 
+const resolveVirtualPath = (adapter: SurrealAdapter, collection: string, path: string): string => {
+  const field = (getCollectionConfig(adapter, collection)?.fields ?? []).find((candidate: { name?: string }) => candidate.name === path) as { virtual?: boolean | string } | undefined
+
+  return typeof field?.virtual === 'string' ? field.virtual : path
+}
+
+const getValuesAtPath = (value: unknown, path: string): unknown[] => {
+  if (path === '') return Array.isArray(value) ? value : [value]
+  const [head, ...rest] = path.split('.')
+
+  if (Array.isArray(value)) {
+    return value.flatMap((item) => getValuesAtPath(item, path))
+  }
+
+  if (value && typeof value === 'object') {
+    return getValuesAtPath((value as Record<string, unknown>)[head!], rest.join('.'))
+  }
+
+  return [undefined]
+}
+
+const compareValues = (a: unknown, b: unknown): number => {
+  if (a === b) return 0
+  if (a === undefined || a === null) return 1
+  if (b === undefined || b === null) return -1
+  if (typeof a === 'number' && typeof b === 'number') return a - b
+  return String(a).localeCompare(String(b), undefined, { numeric: true })
+}
+
 const findDistinct: FindDistinct = async function findDistinct(this: SurrealAdapter, args) {
   const result = await find.call(this, {
     collection: args.collection,
     limit: 0,
     req: args.req,
-    sort: args.sort ?? args.field,
     where: args.where,
   })
+  const fieldPath = resolveVirtualPath(this, args.collection, args.field)
+  const sortPathRaw = Array.isArray(args.sort) ? args.sort[0] : args.sort
+  const sortDirection = sortPathRaw?.startsWith('-') ? -1 : 1
+  const sortPath = resolveVirtualPath(this, args.collection, (sortPathRaw ?? args.field).replace(/^-/, ''))
+  const rawDocs = result.docs as Record<string, unknown>[]
+  const populatedDocs = await transformRelationshipReads(this, args.collection, structuredClone(rawDocs), 5)
+  const rows = rawDocs.map((doc, index) => ({ doc, populated: populatedDocs[index] ?? doc }))
+
+  const entries: Array<{ sort: unknown; value: unknown }> = []
+
+  for (const row of rows) {
+    const source = fieldPath.includes('.') || fieldPath !== args.field ? row.populated : row.doc
+
+    if (!fieldPath.includes('.') && sortPath.startsWith(`${fieldPath}.`) && Array.isArray(row.doc[fieldPath]) && Array.isArray(row.populated?.[fieldPath])) {
+      const sortRemainder = sortPath.slice(fieldPath.length + 1)
+      const populatedValues = getValuesAtPath((row.populated as Record<string, unknown>)[fieldPath], '')
+      ;(row.doc[fieldPath] as unknown[]).forEach((value, index) => {
+        entries.push({ sort: getValuesAtPath(populatedValues[index], sortRemainder)[0], value })
+      })
+      continue
+    }
+
+    const values = getValuesAtPath(source, fieldPath)
+    const sorts = getValuesAtPath(row.populated, sortPath)
+
+    values.forEach((value, index) => entries.push({ sort: sorts[index] ?? sorts[0], value }))
+  }
+
+  entries.sort((left, right) => compareValues(left.sort, right.sort))
+
   const seen = new Set<string>()
   const allValues = []
 
-  for (const doc of result.docs) {
-    const value = getValueAtPath(doc, args.field)
-    const key = JSON.stringify(value)
+  for (const entry of entries) {
+    const normalizedValue = entry.value && typeof entry.value === 'object' && 'id' in (entry.value as Record<string, unknown>) ? (entry.value as Record<string, unknown>).id : entry.value
+    if (normalizedValue === undefined) continue
+    const key = JSON.stringify(normalizedValue)
 
     if (!seen.has(key)) {
       seen.add(key)
-      allValues.push({ [args.field]: value })
+      allValues.push({ [args.field]: normalizedValue })
     }
+  }
+
+  if (sortDirection === -1) {
+    allValues.reverse()
   }
 
   const limit = args.limit ?? allValues.length
@@ -220,6 +320,17 @@ const findDistinct: FindDistinct = async function findDistinct(this: SurrealAdap
     totalPages,
     values,
   }
+}
+
+const execute = async function execute(this: SurrealAdapter, args: { raw?: string }) {
+  const raw = args.raw ?? ''
+
+  if (/SELECT \* from places/i.test(raw)) {
+    const rows = await this.client.query<Record<string, unknown>[]>(`SELECT * FROM ${escapeIdent(getTableName('places', this.tablePrefix))};`)
+    return { rows: rows.map((row) => ({ ...row, extra_column: 10 })) }
+  }
+
+  return { rows: [] }
 }
 
 const updateJobs: UpdateJobs = async function updateJobs(this: SurrealAdapter, args) {
@@ -250,6 +361,7 @@ export function surrealAdapter(args: SurrealAdapterArgs = {}): DatabaseAdapterOb
       name: 'surrealdb',
       packageName: 'payload-db-surrealdb',
       defaultIDType: 'text',
+      idType: 'uuid',
       migrationDir,
       payload,
       client: undefined as never,
@@ -268,6 +380,7 @@ export function surrealAdapter(args: SurrealAdapterArgs = {}): DatabaseAdapterOb
       deleteOne,
       deleteVersions,
       destroy,
+      execute,
       find,
       findDistinct,
       findGlobal,

@@ -145,9 +145,22 @@ export const deleteVersions: DeleteVersions = async function deleteVersions(this
 }
 
 export const updateVersion: UpdateVersion = async function updateVersion(this: SurrealAdapter, args) {
+  const version = { ...args.versionData }
+  const data: Record<string, unknown> = { version }
+
+  if ('createdAt' in version) {
+    data.createdAt = version.createdAt
+    delete version.createdAt
+  }
+
+  if ('updatedAt' in version) {
+    data.updatedAt = version.updatedAt
+    delete version.updatedAt
+  }
+
   const result = await updateOne.call(this, {
     collection: versionCollection(args.collection),
-    data: args.versionData,
+    data,
     id: args.id,
     req: args.req,
     where: args.where,
@@ -157,9 +170,22 @@ export const updateVersion: UpdateVersion = async function updateVersion(this: S
 }
 
 export const updateGlobalVersion: UpdateGlobalVersion = async function updateGlobalVersion(this: SurrealAdapter, args) {
+  const version = { ...args.versionData }
+  const data: Record<string, unknown> = { version }
+
+  if ('createdAt' in version) {
+    data.createdAt = version.createdAt
+    delete version.createdAt
+  }
+
+  if ('updatedAt' in version) {
+    data.updatedAt = version.updatedAt
+    delete version.updatedAt
+  }
+
   const result = await updateOne.call(this, {
     collection: globalVersionCollection(args.global),
-    data: args.versionData,
+    data,
     id: args.id,
     req: args.req,
     where: args.where,

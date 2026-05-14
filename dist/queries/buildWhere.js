@@ -19,11 +19,13 @@ const isHasManyRelationship = (field) => Boolean(field?.hasMany && (field.type =
 const operatorToSQL = (field, operator, value, fields) => {
     const path = pathToSQL(field);
     const fieldConfig = getFieldConfig(fields, field);
-    if (isHasManyRelationship(fieldConfig)) {
+    if (fieldConfig?.hasMany) {
         switch (operator) {
             case 'equals':
+            case 'contains':
                 return `${path} CONTAINS ${valueToSQL(value)}`;
             case 'not_equals':
+            case 'not_contains':
                 return `!(${path} CONTAINS ${valueToSQL(value)})`;
             case 'in':
                 return `array::len(array::intersect(${path}, ${valueToSQL(Array.isArray(value) ? value : [value])})) > 0`;

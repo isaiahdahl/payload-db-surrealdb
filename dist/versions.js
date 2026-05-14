@@ -100,9 +100,19 @@ export const deleteVersions = async function deleteVersions(args) {
     });
 };
 export const updateVersion = async function updateVersion(args) {
+    const version = { ...args.versionData };
+    const data = { version };
+    if ('createdAt' in version) {
+        data.createdAt = version.createdAt;
+        delete version.createdAt;
+    }
+    if ('updatedAt' in version) {
+        data.updatedAt = version.updatedAt;
+        delete version.updatedAt;
+    }
     const result = await updateOne.call(this, {
         collection: versionCollection(args.collection),
-        data: args.versionData,
+        data,
         id: args.id,
         req: args.req,
         where: args.where,
@@ -110,9 +120,19 @@ export const updateVersion = async function updateVersion(args) {
     return args.returning === false ? null : result;
 };
 export const updateGlobalVersion = async function updateGlobalVersion(args) {
+    const version = { ...args.versionData };
+    const data = { version };
+    if ('createdAt' in version) {
+        data.createdAt = version.createdAt;
+        delete version.createdAt;
+    }
+    if ('updatedAt' in version) {
+        data.updatedAt = version.updatedAt;
+        delete version.updatedAt;
+    }
     const result = await updateOne.call(this, {
         collection: globalVersionCollection(args.global),
-        data: args.versionData,
+        data,
         id: args.id,
         req: args.req,
         where: args.where,
