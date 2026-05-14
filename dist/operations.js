@@ -18,13 +18,20 @@ const getVirtualAlias = (adapter, collection, path) => {
     const virtualPath = getVirtualPath(adapter, collection, root);
     return virtualPath ? [virtualPath, ...rest].filter(Boolean).join('.') : undefined;
 };
+const isRelationshipPath = (adapter, collection, path) => {
+    const [root, ...rest] = path.split('.');
+    if (!rest.length)
+        return false;
+    const field = getCollectionConfig(adapter, collection)?.fields?.find((item) => item.name === root);
+    return field?.type === 'relationship' || field?.type === 'upload';
+};
 const whereUsesVirtual = (adapter, collection, where) => {
     if (!where || typeof where !== 'object' || Array.isArray(where))
         return false;
     return Object.entries(where).some(([key, value]) => {
         if ((key === 'and' || key === 'or') && Array.isArray(value))
             return value.some((entry) => whereUsesVirtual(adapter, collection, entry));
-        return Boolean(getVirtualAlias(adapter, collection, key));
+        return Boolean(getVirtualAlias(adapter, collection, key)) || isRelationshipPath(adapter, collection, key);
     });
 };
 const sortValues = (sort) => (Array.isArray(sort) ? sort : sort ? [sort] : [])

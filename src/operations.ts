@@ -40,11 +40,18 @@ const getVirtualAlias = (adapter: SurrealAdapter, collection: string, path: stri
   return virtualPath ? [virtualPath, ...rest].filter(Boolean).join('.') : undefined
 }
 
+const isRelationshipPath = (adapter: SurrealAdapter, collection: string, path: string): boolean => {
+  const [root, ...rest] = path.split('.')
+  if (!rest.length) return false
+  const field = getCollectionConfig(adapter, collection)?.fields?.find((item: { name?: string }) => item.name === root) as { type?: string } | undefined
+  return field?.type === 'relationship' || field?.type === 'upload'
+}
+
 const whereUsesVirtual = (adapter: SurrealAdapter, collection: string, where: unknown): boolean => {
   if (!where || typeof where !== 'object' || Array.isArray(where)) return false
   return Object.entries(where as Record<string, unknown>).some(([key, value]) => {
     if ((key === 'and' || key === 'or') && Array.isArray(value)) return value.some((entry) => whereUsesVirtual(adapter, collection, entry))
-    return Boolean(getVirtualAlias(adapter, collection, key))
+    return Boolean(getVirtualAlias(adapter, collection, key)) || isRelationshipPath(adapter, collection, key)
   })
 }
 
