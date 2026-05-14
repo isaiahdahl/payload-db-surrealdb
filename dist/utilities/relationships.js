@@ -120,7 +120,17 @@ const getRelationCollections = (field) => {
     }
     return typeof field.relationTo === 'string' ? [field.relationTo] : [];
 };
-const normalizeFetchedDocs = (docs) => (docs ?? []).map((doc) => normalizeDocument(doc)).filter(Boolean);
+const stripUndefined = (value) => {
+    if (Array.isArray(value))
+        return value.map(stripUndefined);
+    if (isPlainObject(value)) {
+        return Object.fromEntries(Object.entries(value)
+            .filter(([, nested]) => nested !== undefined)
+            .map(([key, nested]) => [key, stripUndefined(nested)]));
+    }
+    return value;
+};
+const normalizeFetchedDocs = (docs) => (docs ?? []).map((doc) => stripUndefined(normalizeDocument(doc))).filter(Boolean);
 const getVersionBaseCollection = (adapter, collection) => {
     if (!collection.endsWith('_versions'))
         return undefined;
@@ -134,7 +144,10 @@ const fetchByIDs = async (adapter, collection, ids, depth) => {
         return docsByID;
     }
     const table = escapeIdent(collection.replaceAll('-', '_'));
-    const docs = normalizeFetchedDocs(await adapter.client.query(`SELECT * FROM ${table} WHERE meta::id(id) IN ${literal(uniqueIDs)};`));
+    const config = getCollectionConfig(adapter, collection);
+    const idField = config?.fields?.find((field) => field.name === 'id');
+    const hasNumericIDs = idField?.type === 'number' || config?.customIDType === 'number' || collection.endsWith('-number');
+    const docs = normalizeFetchedDocs(await adapter.client.query(`SELECT * FROM ${table} WHERE meta::id(id) IN ${literal(uniqueIDs)};`)).map((doc) => hasNumericIDs && typeof doc.id === 'string' && !Number.isNaN(Number(doc.id)) ? { ...doc, id: Number(doc.id) } : doc);
     const populated = await transformRelationshipReads(adapter, collection, docs, depth);
     for (const doc of populated) {
         docsByID.set(String(doc.id), doc);
@@ -151,9 +164,11 @@ const populateRelationshipFields = async (adapter, collection, docs, depth) => {
         }
         if (field.localized) {
             const localeEntries = [];
+            const scalarLocaleDocs = [];
             for (const doc of targetDocs) {
                 const value = doc[field.name];
                 if (!isPlainObject(value)) {
+                    scalarLocaleDocs.push(doc);
                     continue;
                 }
                 for (const [locale, localeValue] of Object.entries(value)) {
@@ -162,6 +177,7 @@ const populateRelationshipFields = async (adapter, collection, docs, depth) => {
                 }
             }
             await populateField({ ...field, localized: false }, localeEntries.map((entry) => entry.wrapper));
+            await populateField({ ...field, localized: false }, scalarLocaleDocs);
             for (const { doc, locale, wrapper } of localeEntries) {
                 ;
                 doc[field.name][locale] = wrapper[field.name];

@@ -25,6 +25,17 @@ export const queueTransactionStatement = async (adapter, req, statement) => {
     transaction.statements.push(statement.trim().endsWith(';') ? statement.trim() : `${statement.trim()};`);
     return true;
 };
+export const addTransactionDoc = async (adapter, req, collection, doc) => {
+    const transaction = await getTransaction(adapter, req);
+    if (!transaction)
+        return;
+    transaction.docs ??= {};
+    transaction.docs[collection] = [...(transaction.docs[collection] ?? []), doc];
+};
+export const getTransactionDocs = async (adapter, req, collection) => {
+    const transaction = await getTransaction(adapter, req);
+    return transaction?.docs?.[collection] ?? [];
+};
 export const beginTransaction = async function beginTransaction() {
     const id = randomID();
     if (!this.sessions) {

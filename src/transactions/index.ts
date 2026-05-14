@@ -4,6 +4,7 @@ import type { SurrealAdapter } from '../index.js'
 
 export type SurrealTransactionSession = {
   createdAt: number
+  docs?: Record<string, Record<string, unknown>[]>
   statements: string[]
 }
 
@@ -52,6 +53,27 @@ export const queueTransactionStatement = async (
   transaction.statements.push(statement.trim().endsWith(';') ? statement.trim() : `${statement.trim()};`)
 
   return true
+}
+
+export const addTransactionDoc = async (
+  adapter: SurrealAdapter,
+  req: { transactionID?: Promise<number | string | null> | number | string | null } | undefined,
+  collection: string,
+  doc: Record<string, unknown>,
+): Promise<void> => {
+  const transaction = await getTransaction(adapter, req)
+  if (!transaction) return
+  transaction.docs ??= {}
+  transaction.docs[collection] = [...(transaction.docs[collection] ?? []), doc]
+}
+
+export const getTransactionDocs = async (
+  adapter: SurrealAdapter,
+  req: { transactionID?: Promise<number | string | null> | number | string | null } | undefined,
+  collection: string,
+): Promise<Record<string, unknown>[]> => {
+  const transaction = await getTransaction(adapter, req)
+  return transaction?.docs?.[collection] ?? []
 }
 
 export const beginTransaction: BeginTransaction = async function beginTransaction(this: SurrealAdapter) {

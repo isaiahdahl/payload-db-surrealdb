@@ -54,9 +54,9 @@ const operatorToSQL = (field, operator, value, fields) => {
     }
     switch (operator) {
         case 'equals':
-            return `${path} = ${valueToSQL(normalizedValue)}`;
+            return normalizedValue === null ? `(${path} = NONE OR ${path} = NULL)` : `${path} = ${valueToSQL(normalizedValue)}`;
         case 'not_equals':
-            return `${path} != ${valueToSQL(normalizedValue)}`;
+            return normalizedValue === null ? `(${path} != NONE AND ${path} != NULL)` : `${path} != ${valueToSQL(normalizedValue)}`;
         case 'greater_than':
             return `${path} > ${valueToSQL(normalizedValue)}`;
         case 'greater_than_equal':

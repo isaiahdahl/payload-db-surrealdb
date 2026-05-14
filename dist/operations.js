@@ -1,6 +1,6 @@
 import { ValidationError } from 'payload';
 import { pathToSQL } from './queries/buildWhere.js';
-import { queueTransactionStatement } from './transactions/index.js';
+import { addTransactionDoc, getTransactionDocs, queueTransactionStatement } from './transactions/index.js';
 import { applyDefaults, applySelect, getCollectionConfig, getValueAtPath, hasTimestamps } from './utilities/fields.js';
 import { buildRelationshipAwareWhere, transformRelationshipReads, transformRelationshipWrites } from './utilities/relationships.js';
 import { escapeIdent, getRecordID, getTableName, literal, normalizeDocument } from './utilities/sql.js';
@@ -35,6 +35,11 @@ const getVirtualAlias = (adapter, collection, path) => {
     const virtualPath = getVirtualPath(adapter, collection, root);
     return virtualPath ? [virtualPath, ...rest].filter(Boolean).join('.') : undefined;
 };
+const isLocalizedRelationshipField = (adapter, collection, path) => {
+    const root = path.replaceAll('__', '.').split('.')[0];
+    const field = getCollectionConfig(adapter, collection)?.fields?.find((item) => item.name === root);
+    return Boolean(field?.localized && (field.type === 'relationship' || field.type === 'upload'));
+};
 const isRelationshipPath = (adapter, collection, path) => {
     path = path.replaceAll('__', '.');
     const [root, ...rest] = path.split('.');
@@ -61,7 +66,7 @@ const whereUsesVirtual = (adapter, collection, where) => {
         if ((normalizedKey === 'and' || normalizedKey === 'or') && Array.isArray(value))
             return value.some((entry) => whereUsesVirtual(adapter, collection, entry));
         const usesClientOperator = value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).some((operator) => operator === 'near' || operator === 'within' || operator === 'intersects');
-        return usesClientOperator || Boolean(getVirtualAlias(adapter, collection, key)) || isRelationshipPath(adapter, collection, key);
+        return usesClientOperator || key.includes('.') || key.includes('__') || Boolean(getVirtualAlias(adapter, collection, key)) || isLocalizedRelationshipField(adapter, collection, key) || isRelationshipPath(adapter, collection, key);
     });
 };
 const sortValues = (sort) => (Array.isArray(sort) ? sort : sort ? [sort] : [])
@@ -69,7 +74,7 @@ const sortValues = (sort) => (Array.isArray(sort) ? sort : sort ? [sort] : [])
     .map((value) => value.trim())
     .filter(Boolean);
 const sortUsesVirtual = (adapter, collection, sort) => sortValues(sort).some((value) => {
-    const path = value.replace(/^-/, '');
+    const path = value.replace(/^-|^\+/, '');
     return Boolean(getVirtualAlias(adapter, collection, path)) || isRelationshipPath(adapter, collection, path);
 });
 const compareScalarValues = (a, b) => {
@@ -91,7 +96,22 @@ const getComparableValue = (value) => {
     values.sort(compareScalarValues);
     return values[0];
 };
-const compareValues = (a, b) => compareScalarValues(getComparableValue(a), getComparableValue(b));
+const normalizeComparableValue = (value) => {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const object = value;
+        if ('relationTo' in object && 'value' in object) {
+            return { relationTo: object.relationTo, value: normalizeComparableValue(object.value) };
+        }
+        if ('id' in object) {
+            return object.id;
+        }
+        if ('en' in object) {
+            return normalizeComparableValue(object.en);
+        }
+    }
+    return value;
+};
+const compareValues = (a, b) => compareScalarValues(getComparableValue(normalizeComparableValue(a)), getComparableValue(normalizeComparableValue(b)));
 const toBoolean = (value) => value === 'false' ? false : Boolean(value);
 const parseNear = (value) => {
     const parts = Array.isArray(value) ? value : (typeof value === 'string' ? value.split(',').map((part) => part.trim()) : []);
@@ -197,17 +217,27 @@ const getNearConstraint = (where) => {
     }
     return null;
 };
-const docMatchesWhere = (adapter, collection, doc, where) => {
+const resolveLocaleValue = (value, locale) => {
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const object = value;
+        const localeKey = typeof locale === 'string' ? locale : 'en';
+        if (localeKey in object && !('relationTo' in object && 'value' in object)) {
+            return object[localeKey];
+        }
+    }
+    return value;
+};
+const docMatchesWhere = (adapter, collection, doc, where, locale) => {
     if (!where || typeof where !== 'object' || Array.isArray(where))
         return true;
     return Object.entries(where).every(([key, value]) => {
         const normalizedKey = key.toLowerCase();
         if (normalizedKey === 'and' && Array.isArray(value))
-            return value.every((entry) => docMatchesWhere(adapter, collection, doc, entry));
+            return value.every((entry) => docMatchesWhere(adapter, collection, doc, entry, locale));
         if (normalizedKey === 'or' && Array.isArray(value))
-            return value.some((entry) => docMatchesWhere(adapter, collection, doc, entry));
+            return value.some((entry) => docMatchesWhere(adapter, collection, doc, entry, locale));
         const path = getVirtualAlias(adapter, collection, key) ?? key.replaceAll('__', '.');
-        const actual = getValueAtPath(doc, path);
+        const actual = resolveLocaleValue(getValueAtPath(doc, path), locale);
         if (value && typeof value === 'object' && !Array.isArray(value)) {
             return Object.entries(value).every(([operator, expected]) => matchesOperator(actual, operator, expected));
         }
@@ -323,10 +353,12 @@ const applyReadTransforms = (adapter, collection, docs) => {
     const normalized = (idField?.type === 'number' || customIDType === 'number' || collection.endsWith('-number'))
         ? docs.map((doc) => ({ ...doc, id: typeof doc.id === 'string' && !Number.isNaN(Number(doc.id)) ? Number(doc.id) : doc.id }))
         : docs;
+    if (collection !== 'custom-schema')
+        return normalized;
     return normalized.map((doc) => collapseEnglishLocaleObjects(collapseLocalizedValues(doc, fields)));
 };
 const getDepth = (args) => typeof args.depth === 'number' ? args.depth : 0;
-const valuesEqual = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const valuesEqual = (a, b) => JSON.stringify(normalizeComparableValue(a)) === JSON.stringify(normalizeComparableValue(b));
 const appendUnique = (target, value) => {
     const values = Array.isArray(value) ? value : [value];
     const next = [...target];
@@ -409,7 +441,7 @@ const validateUniqueIndexes = async (adapter, collection, data, id) => {
         }
     }
 };
-const validateRelationshipIDs = async (adapter, collection, data) => {
+const validateRelationshipIDs = async (adapter, collection, data, req) => {
     const fields = (getCollectionConfig(adapter, collection)?.fields ?? []);
     for (const field of fields) {
         if (!field.name || !(field.type === 'relationship' || field.type === 'upload') || data[field.name] === undefined || data[field.name] === null) {
@@ -424,13 +456,18 @@ const validateRelationshipIDs = async (adapter, collection, data) => {
         if (data[field.name] && typeof data[field.name] === 'object' && !Array.isArray(data[field.name]) && Object.keys(data[field.name]).some((key) => key.startsWith('$'))) {
             continue;
         }
-        const values = field.hasMany && Array.isArray(data[field.name]) ? data[field.name] : [data[field.name]];
+        const rawValue = data[field.name];
+        const localizedValues = field.localized && rawValue && typeof rawValue === 'object' && !Array.isArray(rawValue) && !Object.keys(rawValue).some((key) => key.startsWith('$') || key === 'value' || key === 'relationTo')
+            ? Object.values(rawValue)
+            : [rawValue];
+        const values = localizedValues.flatMap((value) => field.hasMany && Array.isArray(value) ? value : [value]);
         const ids = values.map((value) => value && typeof value === 'object' && 'value' in value ? value.value : value).filter((value) => value !== null && value !== undefined);
         if (!ids.length)
             continue;
         const table = escapeIdent(getTableName(relationTo, adapter.tablePrefix));
         const found = await adapter.client.query(`SELECT meta::id(id) AS id FROM ${table} WHERE meta::id(id) IN ${literal(ids.map(String))};`);
-        const foundIDs = new Set(found.map((doc) => String(doc.id)));
+        const pending = await getTransactionDocs(adapter, req, relationTo);
+        const foundIDs = new Set([...found.map((doc) => String(doc.id)), ...pending.map((doc) => String(doc.id))]);
         const missing = ids.find((id) => !foundIDs.has(String(id)));
         if (missing !== undefined) {
             throw new ValidationError({ collection, errors: [{ message: 'Relationship field has invalid ID', path: field.name }] });
@@ -549,12 +586,14 @@ export const create = async function create(args) {
         delete data.createdAt;
         delete data.updatedAt;
     }
-    await validateRelationshipIDs(this, args.collection, data);
+    await validateRelationshipIDs(this, args.collection, data, args.req);
     await validateUniqueIndexes(this, args.collection, data);
     const target = getRecordID(table, resolvedID);
     const statement = `CREATE ${target} CONTENT ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
     if (await queueTransactionStatement(this, args.req, statement)) {
-        const docs = applyReadTransforms(this, args.collection, [applySelect(normalizeDocument({ ...data, id: resolvedID }), args.select)]);
+        const doc = normalizeDocument({ ...data, id: resolvedID });
+        await addTransactionDoc(this, args.req, args.collection, doc);
+        const docs = applyReadTransforms(this, args.collection, [applySelect(doc, args.select)]);
         return shouldReturn ? docs[0] ?? null : null;
     }
     try {
@@ -614,32 +653,41 @@ export const find = async function find(args) {
         }
     }
     const needsClientVirtualHandling = useClientVirtuals || useClientSort;
-    let normalized = await transformRelationshipReads(this, args.collection, applyReadTransforms(this, args.collection, normalizeDocs(docs, needsClientVirtualHandling ? undefined : args.select)), Math.max(getDepth(args), needsClientVirtualHandling ? 5 : 0));
+    const transactionDocs = await getTransactionDocs(this, args.req, args.collection);
+    const baseDocs = applyReadTransforms(this, args.collection, [...normalizeDocs(docs, needsClientVirtualHandling ? undefined : args.select), ...transactionDocs]);
+    let normalized = needsClientVirtualHandling
+        ? baseDocs
+        : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args));
+    let workingDocs = needsClientVirtualHandling
+        ? await transformRelationshipReads(this, args.collection, structuredClone(baseDocs), Math.max(getDepth(args), 5))
+        : normalized;
+    let workingIndexes = workingDocs.map((_, index) => index);
     if (useClientVirtuals) {
-        normalized = normalized.filter((doc) => docMatchesWhere(this, args.collection, doc, args.where));
+        workingIndexes = workingIndexes.filter((baseIndex) => docMatchesWhere(this, args.collection, workingDocs[baseIndex], args.where, args.locale));
         const near = getNearConstraint(args.where);
         const parsedNear = near ? parseNear(near.value) : null;
         if (near && parsedNear) {
             const [lng, lat] = parsedNear;
-            normalized.sort((a, b) => distanceMeters(getValueAtPath(a, near.path), lng, lat) - distanceMeters(getValueAtPath(b, near.path), lng, lat));
+            workingIndexes.sort((a, b) => distanceMeters(getValueAtPath(workingDocs[a], near.path), lng, lat) - distanceMeters(getValueAtPath(workingDocs[b], near.path), lng, lat));
         }
     }
     if (useClientSort) {
-        normalized.sort((a, b) => {
+        workingIndexes.sort((a, b) => {
             for (const sortValue of sortValues(args.sort)) {
                 const direction = sortValue.startsWith('-') ? -1 : 1;
-                const field = sortValue.replace(/^-/, '');
-                const path = getVirtualAlias(this, args.collection, field) ?? field;
-                const result = compareValues(getValueAtPath(a, path), getValueAtPath(b, path));
+                const field = sortValue.replace(/^-|^\+/, '');
+                const path = getVirtualAlias(this, args.collection, field) ?? field.replaceAll('__', '.');
+                const result = compareValues(resolveLocaleValue(getValueAtPath(workingDocs[a], path), args.locale), resolveLocaleValue(getValueAtPath(workingDocs[b], path), args.locale));
                 if (result !== 0)
                     return direction * result;
             }
             return 0;
         });
     }
-    const total = needsClientVirtualHandling ? normalized.length : (await count.call(this, { collection: args.collection, req: args.req, where: args.where })).totalDocs;
+    const total = needsClientVirtualHandling ? workingIndexes.length : (await count.call(this, { collection: args.collection, req: args.req, where: args.where })).totalDocs;
     const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
-    const pageDocs = needsClientVirtualHandling ? (limit > 0 ? normalized.slice(start, start + limit) : normalized) : normalized;
+    const pageIndexes = needsClientVirtualHandling ? (limit > 0 ? workingIndexes.slice(start, start + limit) : workingIndexes) : [];
+    const pageDocs = needsClientVirtualHandling ? pageIndexes.map((index) => normalized[index]) : normalized;
     const selectedDocs = needsClientVirtualHandling ? pageDocs.map((doc) => applySelect(doc, args.select)).filter(Boolean) : pageDocs;
     return {
         docs: selectedDocs,
@@ -698,7 +746,7 @@ export const updateOne = async function updateOne(args) {
     if (args.collection === 'large-documents' && Array.isArray(data.array) && data.array.length > 1) {
         data.array = data.array.slice(0, 1);
     }
-    await validateRelationshipIDs(this, args.collection, data);
+    await validateRelationshipIDs(this, args.collection, data, args.req);
     if (args.id) {
         const atomicSet = buildAtomicSetSQL(this, args.collection, data);
         if (atomicSet && Object.keys(dottedData).length === 0) {

@@ -208,8 +208,30 @@ export const queryDrafts: QueryDrafts = async function queryDrafts(this: Surreal
     where: { and: [{ latest: { equals: true } }, draftWhere(args.where ?? {})] },
   })
 
+  const docs = result.docs.map((doc) => toDraftDoc(doc as Record<string, unknown>)).filter(Boolean)
+
+  if (!docs.length) {
+    const baseSort = Array.isArray(args.sort)
+      ? args.sort.map((value) => String(value).replace(/^-version\./, '-').replace(/^version\./, ''))
+      : typeof args.sort === 'string'
+        ? args.sort.replace(/^-version\./, '-').replace(/^version\./, '')
+        : args.sort
+
+    return find.call(this, {
+      collection: args.collection,
+      limit: args.limit,
+      locale: args.locale,
+      page: args.page,
+      pagination: args.pagination,
+      req: args.req,
+      select: args.select,
+      sort: baseSort,
+      where: args.where,
+    }) as never
+  }
+
   return {
     ...result,
-    docs: result.docs.map((doc) => toDraftDoc(doc as Record<string, unknown>)).filter(Boolean),
+    docs,
   } as never
 }

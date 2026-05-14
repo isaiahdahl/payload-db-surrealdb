@@ -62,7 +62,12 @@ const transformValueForWrite = (value, field) => {
     if ((field.type === 'array' || field.type === 'blocks') && Array.isArray(value)) {
         return value.map((row) => {
             if (row && typeof row === 'object' && !Array.isArray(row)) {
-                return sanitizeDataForWrite(row, getNestedFields(field, row));
+                const sanitized = sanitizeDataForWrite(row, getNestedFields(field, row));
+                if (field.type === 'blocks' && 'blockType' in row)
+                    sanitized.blockType = row.blockType;
+                if ('id' in row)
+                    sanitized.id = row.id;
+                return sanitized;
             }
             return row;
         });
