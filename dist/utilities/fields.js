@@ -128,12 +128,32 @@ export const getValueAtPath = (doc, path) => {
     if (path === 'id') {
         return doc.id;
     }
-    return path.split('.').reduce((value, part) => {
-        if (value && typeof value === 'object' && !Array.isArray(value)) {
-            return value[part];
+    const getValue = (value, parts) => {
+        if (!parts.length) {
+            return value;
+        }
+        if (Array.isArray(value)) {
+            const values = value
+                .flatMap((item) => {
+                const nestedValue = getValue(item, parts);
+                return Array.isArray(nestedValue) ? nestedValue : [nestedValue];
+            })
+                .filter((item) => item !== undefined);
+            return values.length ? values : undefined;
+        }
+        if (value && typeof value === 'object') {
+            const [part, ...rest] = parts;
+            const objectValue = value;
+            if (part in objectValue) {
+                return getValue(objectValue[part], rest);
+            }
+            if (typeof objectValue.relationTo === 'string' && objectValue.value && typeof objectValue.value === 'object') {
+                return getValue(objectValue.value, parts);
+            }
         }
         return undefined;
-    }, doc);
+    };
+    return getValue(doc, path.split('.'));
 };
 export const setValueAtPath = (doc, path, value) => {
     const parts = path.split('.');

@@ -189,13 +189,39 @@ export const getValueAtPath = (doc: Record<string, unknown>, path: string): unkn
     return doc.id
   }
 
-  return path.split('.').reduce<unknown>((value, part) => {
-    if (value && typeof value === 'object' && !Array.isArray(value)) {
-      return (value as Record<string, unknown>)[part]
+  const getValue = (value: unknown, parts: string[]): unknown => {
+    if (!parts.length) {
+      return value
+    }
+
+    if (Array.isArray(value)) {
+      const values = value
+        .flatMap((item) => {
+          const nestedValue = getValue(item, parts)
+          return Array.isArray(nestedValue) ? nestedValue : [nestedValue]
+        })
+        .filter((item) => item !== undefined)
+
+      return values.length ? values : undefined
+    }
+
+    if (value && typeof value === 'object') {
+      const [part, ...rest] = parts
+      const objectValue = value as Record<string, unknown>
+
+      if (part in objectValue) {
+        return getValue(objectValue[part], rest)
+      }
+
+      if (typeof objectValue.relationTo === 'string' && objectValue.value && typeof objectValue.value === 'object') {
+        return getValue(objectValue.value, parts)
+      }
     }
 
     return undefined
-  }, doc)
+  }
+
+  return getValue(doc, path.split('.'))
 }
 
 export const setValueAtPath = (doc: Record<string, unknown>, path: string, value: unknown): void => {

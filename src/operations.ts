@@ -56,13 +56,26 @@ const sortValues = (sort?: string | string[]): string[] => (Array.isArray(sort) 
 const sortUsesVirtual = (adapter: SurrealAdapter, collection: string, sort?: string | string[]): boolean =>
   sortValues(sort).some((value) => Boolean(getVirtualAlias(adapter, collection, value.replace(/^-/, ''))))
 
-const compareValues = (a: unknown, b: unknown): number => {
+const compareScalarValues = (a: unknown, b: unknown): number => {
   if (a === b) return 0
   if (a === null || a === undefined) return 1
   if (b === null || b === undefined) return -1
   if (typeof a === 'number' && typeof b === 'number') return a - b
   return String(a).localeCompare(String(b), undefined, { numeric: true })
 }
+
+const getComparableValue = (value: unknown): unknown => {
+  if (!Array.isArray(value)) {
+    return value
+  }
+
+  const values = value.filter((item) => item !== null && item !== undefined)
+  values.sort(compareScalarValues)
+
+  return values[0]
+}
+
+const compareValues = (a: unknown, b: unknown): number => compareScalarValues(getComparableValue(a), getComparableValue(b))
 
 const matchesOperator = (actual: unknown, operator: string, expected: unknown): boolean => {
   const actualValues = Array.isArray(actual) ? actual : [actual]

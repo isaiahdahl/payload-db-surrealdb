@@ -32,7 +32,7 @@ const sortValues = (sort) => (Array.isArray(sort) ? sort : sort ? [sort] : [])
     .map((value) => value.trim())
     .filter(Boolean);
 const sortUsesVirtual = (adapter, collection, sort) => sortValues(sort).some((value) => Boolean(getVirtualAlias(adapter, collection, value.replace(/^-/, ''))));
-const compareValues = (a, b) => {
+const compareScalarValues = (a, b) => {
     if (a === b)
         return 0;
     if (a === null || a === undefined)
@@ -43,6 +43,15 @@ const compareValues = (a, b) => {
         return a - b;
     return String(a).localeCompare(String(b), undefined, { numeric: true });
 };
+const getComparableValue = (value) => {
+    if (!Array.isArray(value)) {
+        return value;
+    }
+    const values = value.filter((item) => item !== null && item !== undefined);
+    values.sort(compareScalarValues);
+    return values[0];
+};
+const compareValues = (a, b) => compareScalarValues(getComparableValue(a), getComparableValue(b));
 const matchesOperator = (actual, operator, expected) => {
     const actualValues = Array.isArray(actual) ? actual : [actual];
     const expectedValues = Array.isArray(expected) ? expected : [expected];
