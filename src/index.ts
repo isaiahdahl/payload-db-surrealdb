@@ -245,55 +245,6 @@ const compareValues = (a: unknown, b: unknown): number => {
   return String(a).localeCompare(String(b), undefined, { numeric: true })
 }
 
-const isPlainObject = (value: unknown): value is Record<string, unknown> =>
-  Boolean(value) && typeof value === 'object' && !Array.isArray(value)
-
-const getRelationshipID = (value: unknown): unknown => {
-  if (isPlainObject(value)) {
-    if ('id' in value) return value.id
-    if ('value' in value) return getRelationshipID(value.value)
-  }
-
-  return value
-}
-
-const getFieldByPath = (adapter: SurrealAdapter, collection: string, path: string) => {
-  const [root] = path.split('.')
-
-  return (getCollectionConfig(adapter, collection)?.fields ?? []).find((field: { name?: string }) => field.name === root) as
-    | { name?: string; relationTo?: string | string[]; type?: string }
-    | undefined
-}
-
-const isRelationshipField = (field: { type?: string } | undefined): boolean => field?.type === 'relationship' || field?.type === 'upload'
-
-const getDistinctValue = (value: unknown, field: { relationTo?: string | string[]; type?: string } | undefined, shouldPopulate: boolean): unknown => {
-  if (!isRelationshipField(field)) {
-    return value
-  }
-
-  if (Array.isArray(field?.relationTo) && isPlainObject(value) && typeof value.relationTo === 'string') {
-    return {
-      relationTo: value.relationTo,
-      value: shouldPopulate ? value.value : getRelationshipID(value.value),
-    }
-  }
-
-  return shouldPopulate ? value : getRelationshipID(value)
-}
-
-const getDistinctKey = (value: unknown, field: { relationTo?: string | string[]; type?: string } | undefined): string => {
-  if (isRelationshipField(field)) {
-    if (Array.isArray(field?.relationTo) && isPlainObject(value) && typeof value.relationTo === 'string') {
-      return JSON.stringify({ relationTo: value.relationTo, value: getRelationshipID(value.value) })
-    }
-
-    return JSON.stringify(getRelationshipID(value))
-  }
-
-  return JSON.stringify(value)
-}
-
 const findDistinct: FindDistinct = async function findDistinct(this: SurrealAdapter, args) {
   const result = await find.call(this, {
     collection: args.collection,
@@ -305,23 +256,19 @@ const findDistinct: FindDistinct = async function findDistinct(this: SurrealAdap
   const sortPathRaw = Array.isArray(args.sort) ? args.sort[0] : args.sort
   const sortDirection = sortPathRaw?.startsWith('-') ? -1 : 1
   const sortPath = resolveVirtualPath(this, args.collection, (sortPathRaw ?? args.field).replace(/^-/, ''))
-  const requestedDepth = (args as { depth?: number }).depth ?? 0
   const rawDocs = result.docs as Record<string, unknown>[]
-  const populatedDocs = await transformRelationshipReads(this, args.collection, structuredClone(rawDocs), Math.max(requestedDepth, 1))
+  const populatedDocs = await transformRelationshipReads(this, args.collection, structuredClone(rawDocs), 5)
   const rows = rawDocs.map((doc, index) => ({ doc, populated: populatedDocs[index] ?? doc }))
-  const field = getFieldByPath(this, args.collection, fieldPath)
-  const shouldPopulateDistinct = requestedDepth > 0 && !fieldPath.includes('.')
 
   const entries: Array<{ sort: unknown; value: unknown }> = []
 
   for (const row of rows) {
-    const source = fieldPath.includes('.') || fieldPath !== args.field || shouldPopulateDistinct ? row.populated : row.doc
+    const source = fieldPath.includes('.') || fieldPath !== args.field ? row.populated : row.doc
 
     if (!fieldPath.includes('.') && sortPath.startsWith(`${fieldPath}.`) && Array.isArray(row.doc[fieldPath]) && Array.isArray(row.populated?.[fieldPath])) {
       const sortRemainder = sortPath.slice(fieldPath.length + 1)
       const populatedValues = getValuesAtPath((row.populated as Record<string, unknown>)[fieldPath], '')
-      ;(row.doc[fieldPath] as unknown[]).forEach((rawValue, index) => {
-        const value = shouldPopulateDistinct ? populatedValues[index] : rawValue
+      ;(row.doc[fieldPath] as unknown[]).forEach((value, index) => {
         entries.push({ sort: getValuesAtPath(populatedValues[index], sortRemainder)[0], value })
       })
       continue
@@ -339,12 +286,13 @@ const findDistinct: FindDistinct = async function findDistinct(this: SurrealAdap
   const allValues = []
 
   for (const entry of entries) {
-    if (entry.value === undefined) continue
-    const key = getDistinctKey(entry.value, field)
+    const normalizedValue = entry.value && typeof entry.value === 'object' && 'id' in (entry.value as Record<string, unknown>) ? (entry.value as Record<string, unknown>).id : entry.value
+    if (normalizedValue === undefined) continue
+    const key = JSON.stringify(normalizedValue)
 
     if (!seen.has(key)) {
       seen.add(key)
-      allValues.push({ [args.field]: getDistinctValue(entry.value, field, shouldPopulateDistinct) })
+      allValues.push({ [args.field]: normalizedValue })
     }
   }
 
