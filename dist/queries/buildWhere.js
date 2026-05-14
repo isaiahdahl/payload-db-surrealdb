@@ -11,8 +11,26 @@ export const pathToSQL = (path) => {
         .join('.');
 };
 const valueToSQL = (value) => literal(value);
-const operatorToSQL = (field, operator, value) => {
+const getFieldConfig = (fields, path) => {
+    const root = path.split('.')[0];
+    return fields?.find((field) => field.name === root);
+};
+const isHasManyRelationship = (field) => Boolean(field?.hasMany && (field.type === 'relationship' || field.type === 'upload'));
+const operatorToSQL = (field, operator, value, fields) => {
     const path = pathToSQL(field);
+    const fieldConfig = getFieldConfig(fields, field);
+    if (isHasManyRelationship(fieldConfig)) {
+        switch (operator) {
+            case 'equals':
+                return `${path} CONTAINS ${valueToSQL(value)}`;
+            case 'not_equals':
+                return `!(${path} CONTAINS ${valueToSQL(value)})`;
+            case 'in':
+                return `array::len(array::intersect(${path}, ${valueToSQL(Array.isArray(value) ? value : [value])})) > 0`;
+            case 'not_in':
+                return `array::len(array::intersect(${path}, ${valueToSQL(Array.isArray(value) ? value : [value])})) = 0`;
+        }
+    }
     switch (operator) {
         case 'equals':
             return `${path} = ${valueToSQL(value)}`;
@@ -41,24 +59,24 @@ const operatorToSQL = (field, operator, value) => {
             return `${path} = ${valueToSQL(value)}`;
     }
 };
-const buildClause = (where) => {
+const buildClause = (where, fields) => {
     if (!where || Object.keys(where).length === 0) {
         return '';
     }
     const clauses = Object.entries(where).flatMap(([key, value]) => {
         if ((key === 'and' || key === 'or') && Array.isArray(value)) {
             const joiner = key === 'and' ? ' AND ' : ' OR ';
-            const nested = value.map((entry) => buildClause(entry)).filter(Boolean);
+            const nested = value.map((entry) => buildClause(entry, fields)).filter(Boolean);
             return nested.length ? [`(${nested.join(joiner)})`] : [];
         }
         if (value && typeof value === 'object' && !Array.isArray(value)) {
-            return Object.entries(value).map(([operator, operatorValue]) => operatorToSQL(key, operator, operatorValue));
+            return Object.entries(value).map(([operator, operatorValue]) => operatorToSQL(key, operator, operatorValue, fields));
         }
         return [`${pathToSQL(key)} = ${valueToSQL(value)}`];
     });
     return clauses.filter(Boolean).join(' AND ');
 };
-export const buildWhere = (where) => {
-    const clause = buildClause(where);
+export const buildWhere = (where, fields) => {
+    const clause = buildClause(where, fields);
     return clause ? `WHERE ${clause}` : '';
 };

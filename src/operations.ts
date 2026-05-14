@@ -13,9 +13,10 @@ import type {
 import type { SurrealAdapter } from './index.js'
 
 import { SurrealDBError } from './client.js'
-import { buildWhere, pathToSQL } from './queries/buildWhere.js'
+import { pathToSQL } from './queries/buildWhere.js'
 import { queueTransactionStatement } from './transactions/index.js'
 import { applyDefaults, applySelect, getCollectionConfig, hasTimestamps } from './utilities/fields.js'
+import { buildRelationshipAwareWhere, transformRelationshipReads, transformRelationshipWrites } from './utilities/relationships.js'
 import { escapeIdent, getRecordID, getTableName, literal, normalizeDocument } from './utilities/sql.js'
 
 const randomID = (): string => {
@@ -64,11 +65,14 @@ const mapWriteError = (error: unknown): never => {
 const normalizeDocs = (docs: Array<Record<string, unknown>>, select?: Record<string, unknown>) =>
   docs.map((doc) => applySelect(normalizeDocument(doc), select)).filter(Boolean)
 
+const getDepth = (args: Record<string, unknown>): number => typeof args.depth === 'number' ? args.depth : 0
+
 export const create: Create = async function create(this: SurrealAdapter, args) {
+  const collectionConfig = getCollectionConfig(this, args.collection)
   const table = getTableName(args.collection, this.tablePrefix)
   const id = args.customID ?? args.data.id
   const resolvedID = id ?? randomID()
-  const data = applyDefaults({ ...args.data }, getCollectionConfig(this, args.collection)?.fields)
+  const data = transformRelationshipWrites(applyDefaults({ ...args.data }, collectionConfig?.fields), collectionConfig?.fields)
   const shouldReturn = args.returning !== false
 
   if (resolvedID) {
@@ -91,26 +95,30 @@ export const create: Create = async function create(this: SurrealAdapter, args) 
   }
 
   try {
-    const result = await this.client.query(statement)
+    const result = await this.client.query<Record<string, unknown>[]>(statement)
+    const docs = normalizeDocs(result, args.select) as Record<string, unknown>[]
+    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never))
 
-    return shouldReturn ? applySelect(normalizeDocument(result[0]), args.select) : null
+    return shouldReturn ? populated[0] ?? null : null
   } catch (error) {
     mapWriteError(error)
   }
 }
 
-export const findOne: FindOne = async function findOne(this: SurrealAdapter, args) {
+export const findOne: FindOne = (async function findOne(this: SurrealAdapter, args) {
   const table = escapeIdent(getTableName(args.collection, this.tablePrefix))
-  const where = buildWhere(args.where)
-  const result = await this.client.query(`SELECT * FROM ${table} ${where} LIMIT 1;`)
+  const where = buildRelationshipAwareWhere(this, args.collection, args.where)
+  const result = await this.client.query<Record<string, unknown>[]>(`SELECT * FROM ${table} ${where} LIMIT 1;`)
+  const docs = normalizeDocs(result, args.select) as Record<string, unknown>[]
+  const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never))
 
-  return applySelect(normalizeDocument(result[0]), args.select)
-}
+  return populated[0] ?? null
+}) as FindOne
 
 export const find: Find = async function find(this: SurrealAdapter, args) {
   const table = escapeIdent(getTableName(args.collection, this.tablePrefix))
   const { currentPage, limit, start } = getPagination(args)
-  const where = buildWhere(args.where)
+  const where = buildRelationshipAwareWhere(this, args.collection, args.where)
   const sort = getSortSQL(args.sort)
   const limitSQL = limit > 0 ? `LIMIT ${limit} START ${start}` : ''
   const docs = await this.client.query<Record<string, unknown>[]>(
@@ -120,7 +128,7 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
   const totalPages = limit > 0 ? Math.ceil(totalDocs.totalDocs / limit) : 1
 
   return {
-    docs: normalizeDocs(docs, args.select),
+    docs: await transformRelationshipReads(this, args.collection, normalizeDocs(docs, args.select) as Record<string, unknown>[], getDepth(args as never)),
     hasNextPage: limit > 0 ? currentPage < totalPages : false,
     hasPrevPage: currentPage > 1,
     limit,
@@ -135,7 +143,7 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
 
 export const count: Count = async function count(this: SurrealAdapter, args) {
   const table = escapeIdent(getTableName(args.collection, this.tablePrefix))
-  const where = buildWhere(args.where)
+  const where = buildRelationshipAwareWhere(this, args.collection, args.where)
   const result = await this.client.query(
     `SELECT count() AS count FROM ${table} ${where} GROUP ALL;`,
   )
@@ -144,8 +152,9 @@ export const count: Count = async function count(this: SurrealAdapter, args) {
 }
 
 export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapter, args) {
+  const collectionConfig = getCollectionConfig(this, args.collection)
   const table = getTableName(args.collection, this.tablePrefix)
-  const data = applyDefaults({ ...args.data }, getCollectionConfig(this, args.collection)?.fields)
+  const data = transformRelationshipWrites(applyDefaults({ ...args.data }, collectionConfig?.fields), collectionConfig?.fields)
   const shouldReturn = args.returning !== false
 
   delete data.id
@@ -172,9 +181,11 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
     }
 
     try {
-      const result = await this.client.query(statement)
+      const result = await this.client.query<Record<string, unknown>[]>(statement)
+      const docs = normalizeDocs(result, args.select) as Record<string, unknown>[]
+      const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never))
 
-      return shouldReturn ? applySelect(normalizeDocument(result[0]), args.select) : null
+      return shouldReturn ? populated[0] ?? null : null
     } catch (error) {
       mapWriteError(error)
     }
@@ -193,9 +204,11 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
   }
 
   try {
-    const result = await this.client.query(statement)
+    const result = await this.client.query<Record<string, unknown>[]>(statement)
+    const docs = normalizeDocs(result, args.select) as Record<string, unknown>[]
+    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never))
 
-    return shouldReturn ? applySelect(normalizeDocument(result[0]), args.select) : null
+    return shouldReturn ? populated[0] ?? null : null
   } catch (error) {
     mapWriteError(error)
   }
@@ -236,7 +249,7 @@ export const deleteOne: DeleteOne = async function deleteOne(this: SurrealAdapte
 
 export const deleteMany: DeleteMany = async function deleteMany(this: SurrealAdapter, args) {
   const table = escapeIdent(getTableName(args.collection, this.tablePrefix))
-  const where = buildWhere(args.where)
+  const where = buildRelationshipAwareWhere(this, args.collection, args.where)
   const statement = `DELETE ${table} ${where};`
 
   if (!(await queueTransactionStatement(this, args.req, statement))) {

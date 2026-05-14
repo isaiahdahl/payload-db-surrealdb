@@ -2,6 +2,12 @@ import type { Where } from 'payload'
 
 import { escapeIdent, literal } from '../utilities/sql.js'
 
+type Field = {
+  hasMany?: boolean
+  name?: string
+  type?: string
+}
+
 const simpleIdentifier = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 export const pathToSQL = (path: string): string => {
@@ -18,8 +24,31 @@ export const pathToSQL = (path: string): string => {
 
 const valueToSQL = (value: unknown): string => literal(value)
 
-const operatorToSQL = (field: string, operator: string, value: unknown): string => {
+const getFieldConfig = (fields: Field[] | undefined, path: string): Field | undefined => {
+  const root = path.split('.')[0]
+
+  return fields?.find((field) => field.name === root)
+}
+
+const isHasManyRelationship = (field?: Field): boolean =>
+  Boolean(field?.hasMany && (field.type === 'relationship' || field.type === 'upload'))
+
+const operatorToSQL = (field: string, operator: string, value: unknown, fields?: Field[]): string => {
   const path = pathToSQL(field)
+  const fieldConfig = getFieldConfig(fields, field)
+
+  if (isHasManyRelationship(fieldConfig)) {
+    switch (operator) {
+      case 'equals':
+        return `${path} CONTAINS ${valueToSQL(value)}`
+      case 'not_equals':
+        return `!(${path} CONTAINS ${valueToSQL(value)})`
+      case 'in':
+        return `array::len(array::intersect(${path}, ${valueToSQL(Array.isArray(value) ? value : [value])})) > 0`
+      case 'not_in':
+        return `array::len(array::intersect(${path}, ${valueToSQL(Array.isArray(value) ? value : [value])})) = 0`
+    }
+  }
 
   switch (operator) {
     case 'equals':
@@ -50,7 +79,7 @@ const operatorToSQL = (field: string, operator: string, value: unknown): string 
   }
 }
 
-const buildClause = (where?: Where): string => {
+const buildClause = (where?: Where, fields?: Field[]): string => {
   if (!where || Object.keys(where).length === 0) {
     return ''
   }
@@ -58,14 +87,14 @@ const buildClause = (where?: Where): string => {
   const clauses = Object.entries(where).flatMap(([key, value]) => {
     if ((key === 'and' || key === 'or') && Array.isArray(value)) {
       const joiner = key === 'and' ? ' AND ' : ' OR '
-      const nested = value.map((entry) => buildClause(entry as Where)).filter(Boolean)
+      const nested = value.map((entry) => buildClause(entry as Where, fields)).filter(Boolean)
 
       return nested.length ? [`(${nested.join(joiner)})`] : []
     }
 
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       return Object.entries(value as Record<string, unknown>).map(([operator, operatorValue]) =>
-        operatorToSQL(key, operator, operatorValue),
+        operatorToSQL(key, operator, operatorValue, fields),
       )
     }
 
@@ -75,8 +104,8 @@ const buildClause = (where?: Where): string => {
   return clauses.filter(Boolean).join(' AND ')
 }
 
-export const buildWhere = (where?: Where): string => {
-  const clause = buildClause(where)
+export const buildWhere = (where?: Where, fields?: Field[]): string => {
+  const clause = buildClause(where, fields)
 
   return clause ? `WHERE ${clause}` : ''
 }

@@ -59,6 +59,9 @@ This alpha currently has a basic executable adapter scaffold:
 - basic collection CRUD
 - simple `where` compiler
 - ID normalization from SurrealDB record IDs to Payload IDs
+- relationship/upload storage transforms for simple, hasMany, and polymorphic fields
+- basic relationship querying by ID and depth-based population
+- basic batched reverse join resolution for simple join fields
 - globals basics
 - migration file scaffolding basics
 - lightweight versions wrappers
@@ -70,8 +73,8 @@ This alpha currently has a basic executable adapter scaffold:
 This is not production ready. Major missing/incomplete areas:
 
 - fully interactive request-scoped transactions with read-your-writes semantics
-- relationship population
-- join fields
+- complete relationship population parity for all nested/localized field shapes
+- complete join fields, including polymorphic joins and full pagination/filtering semantics
 - localization semantics
 - complete versions/drafts behavior
 - unique indexes and duplicate error mapping
@@ -123,7 +126,16 @@ Known concurrency limits remain: HTTP SurrealQL does not provide an interactive 
 npm run build
 docker compose up -d
 node smoke.mjs
+npm run smoke:relationships
 ```
+
+## Relationship storage semantics
+
+- Simple `relationship` and `upload` fields are stored as the related document ID scalar.
+- `hasMany` `relationship` and `upload` fields are stored as arrays of related document IDs.
+- Polymorphic relationships are stored as `{ relationTo, value }`, where `value` is the related document ID; polymorphic `hasMany` fields store arrays of those objects.
+
+Reads convert SurrealDB record IDs back to Payload IDs and support basic `depth` population for simple, hasMany, polymorphic, and upload relationships. Reverse `join` fields are resolved in batches for simple `collection`/`on` joins with count metadata, limit, and sort.
 
 ## Payload monorepo test harness
 

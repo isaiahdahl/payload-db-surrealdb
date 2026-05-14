@@ -24,7 +24,8 @@
     "clean": "rm -rf dist",
     "prepack": "npm run clean && npm run build",
     "smoke": "npm run build && node smoke.mjs",
-    "test:transactions": "npm run build && node tests/transactions-versions.mjs"
+    "test:transactions": "npm run build && node tests/transactions-versions.mjs",
+    "smoke:relationships": "npm run build && node relationship-smoke.mjs"
   },
   "keywords": [
     "payload",

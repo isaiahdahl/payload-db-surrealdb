@@ -1,7 +1,8 @@
 import { SurrealDBError } from './client.js';
-import { buildWhere, pathToSQL } from './queries/buildWhere.js';
+import { pathToSQL } from './queries/buildWhere.js';
 import { queueTransactionStatement } from './transactions/index.js';
 import { applyDefaults, applySelect, getCollectionConfig, hasTimestamps } from './utilities/fields.js';
+import { buildRelationshipAwareWhere, transformRelationshipReads, transformRelationshipWrites } from './utilities/relationships.js';
 import { escapeIdent, getRecordID, getTableName, literal, normalizeDocument } from './utilities/sql.js';
 const randomID = () => {
     const crypto = globalThis.crypto;
@@ -36,11 +37,13 @@ const mapWriteError = (error) => {
     throw error;
 };
 const normalizeDocs = (docs, select) => docs.map((doc) => applySelect(normalizeDocument(doc), select)).filter(Boolean);
+const getDepth = (args) => typeof args.depth === 'number' ? args.depth : 0;
 export const create = async function create(args) {
+    const collectionConfig = getCollectionConfig(this, args.collection);
     const table = getTableName(args.collection, this.tablePrefix);
     const id = args.customID ?? args.data.id;
     const resolvedID = id ?? randomID();
-    const data = applyDefaults({ ...args.data }, getCollectionConfig(this, args.collection)?.fields);
+    const data = transformRelationshipWrites(applyDefaults({ ...args.data }, collectionConfig?.fields), collectionConfig?.fields);
     const shouldReturn = args.returning !== false;
     if (resolvedID) {
         delete data.id;
@@ -60,29 +63,33 @@ export const create = async function create(args) {
     }
     try {
         const result = await this.client.query(statement);
-        return shouldReturn ? applySelect(normalizeDocument(result[0]), args.select) : null;
+        const docs = normalizeDocs(result, args.select);
+        const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args));
+        return shouldReturn ? populated[0] ?? null : null;
     }
     catch (error) {
         mapWriteError(error);
     }
 };
-export const findOne = async function findOne(args) {
+export const findOne = (async function findOne(args) {
     const table = escapeIdent(getTableName(args.collection, this.tablePrefix));
-    const where = buildWhere(args.where);
+    const where = buildRelationshipAwareWhere(this, args.collection, args.where);
     const result = await this.client.query(`SELECT * FROM ${table} ${where} LIMIT 1;`);
-    return applySelect(normalizeDocument(result[0]), args.select);
-};
+    const docs = normalizeDocs(result, args.select);
+    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args));
+    return populated[0] ?? null;
+});
 export const find = async function find(args) {
     const table = escapeIdent(getTableName(args.collection, this.tablePrefix));
     const { currentPage, limit, start } = getPagination(args);
-    const where = buildWhere(args.where);
+    const where = buildRelationshipAwareWhere(this, args.collection, args.where);
     const sort = getSortSQL(args.sort);
     const limitSQL = limit > 0 ? `LIMIT ${limit} START ${start}` : '';
     const docs = await this.client.query(`SELECT * FROM ${table} ${where} ${sort} ${limitSQL};`);
     const totalDocs = await count.call(this, { collection: args.collection, req: args.req, where: args.where });
     const totalPages = limit > 0 ? Math.ceil(totalDocs.totalDocs / limit) : 1;
     return {
-        docs: normalizeDocs(docs, args.select),
+        docs: await transformRelationshipReads(this, args.collection, normalizeDocs(docs, args.select), getDepth(args)),
         hasNextPage: limit > 0 ? currentPage < totalPages : false,
         hasPrevPage: currentPage > 1,
         limit,
@@ -96,13 +103,14 @@ export const find = async function find(args) {
 };
 export const count = async function count(args) {
     const table = escapeIdent(getTableName(args.collection, this.tablePrefix));
-    const where = buildWhere(args.where);
+    const where = buildRelationshipAwareWhere(this, args.collection, args.where);
     const result = await this.client.query(`SELECT count() AS count FROM ${table} ${where} GROUP ALL;`);
     return { totalDocs: result[0]?.count ?? 0 };
 };
 export const updateOne = async function updateOne(args) {
+    const collectionConfig = getCollectionConfig(this, args.collection);
     const table = getTableName(args.collection, this.tablePrefix);
-    const data = applyDefaults({ ...args.data }, getCollectionConfig(this, args.collection)?.fields);
+    const data = transformRelationshipWrites(applyDefaults({ ...args.data }, collectionConfig?.fields), collectionConfig?.fields);
     const shouldReturn = args.returning !== false;
     delete data.id;
     if (hasTimestamps(this, args.collection)) {
@@ -126,7 +134,9 @@ export const updateOne = async function updateOne(args) {
         }
         try {
             const result = await this.client.query(statement);
-            return shouldReturn ? applySelect(normalizeDocument(result[0]), args.select) : null;
+            const docs = normalizeDocs(result, args.select);
+            const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args));
+            return shouldReturn ? populated[0] ?? null : null;
         }
         catch (error) {
             mapWriteError(error);
@@ -142,7 +152,9 @@ export const updateOne = async function updateOne(args) {
     }
     try {
         const result = await this.client.query(statement);
-        return shouldReturn ? applySelect(normalizeDocument(result[0]), args.select) : null;
+        const docs = normalizeDocs(result, args.select);
+        const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args));
+        return shouldReturn ? populated[0] ?? null : null;
     }
     catch (error) {
         mapWriteError(error);
@@ -175,7 +187,7 @@ export const deleteOne = async function deleteOne(args) {
 };
 export const deleteMany = async function deleteMany(args) {
     const table = escapeIdent(getTableName(args.collection, this.tablePrefix));
-    const where = buildWhere(args.where);
+    const where = buildRelationshipAwareWhere(this, args.collection, args.where);
     const statement = `DELETE ${table} ${where};`;
     if (!(await queueTransactionStatement(this, args.req, statement))) {
         await this.client.query(statement);
