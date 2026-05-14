@@ -1,7 +1,12 @@
 import { SurrealDBError } from './client.js';
 import { buildWhere, pathToSQL } from './queries/buildWhere.js';
+import { queueTransactionStatement } from './transactions/index.js';
 import { applyDefaults, applySelect, getCollectionConfig, hasTimestamps } from './utilities/fields.js';
 import { escapeIdent, getRecordID, getTableName, literal, normalizeDocument } from './utilities/sql.js';
+const randomID = () => {
+    const crypto = globalThis.crypto;
+    return crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+};
 const getSortSQL = (sort) => {
     const sortValues = (Array.isArray(sort) ? sort : sort ? [sort] : [])
         .flatMap((value) => String(value).split(','))
@@ -34,9 +39,10 @@ const normalizeDocs = (docs, select) => docs.map((doc) => applySelect(normalizeD
 export const create = async function create(args) {
     const table = getTableName(args.collection, this.tablePrefix);
     const id = args.customID ?? args.data.id;
+    const resolvedID = id ?? randomID();
     const data = applyDefaults({ ...args.data }, getCollectionConfig(this, args.collection)?.fields);
     const shouldReturn = args.returning !== false;
-    if (id) {
+    if (resolvedID) {
         delete data.id;
     }
     if (hasTimestamps(this, args.collection)) {
@@ -47,9 +53,13 @@ export const create = async function create(args) {
         delete data.createdAt;
         delete data.updatedAt;
     }
-    const target = id ? getRecordID(table, id) : escapeIdent(table);
+    const target = getRecordID(table, resolvedID);
+    const statement = `CREATE ${target} CONTENT ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
+    if (await queueTransactionStatement(this, args.req, statement)) {
+        return shouldReturn ? applySelect(normalizeDocument({ ...data, id: resolvedID }), args.select) : null;
+    }
     try {
-        const result = await this.client.query(`CREATE ${target} CONTENT ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`);
+        const result = await this.client.query(statement);
         return shouldReturn ? applySelect(normalizeDocument(result[0]), args.select) : null;
     }
     catch (error) {
@@ -108,8 +118,14 @@ export const updateOne = async function updateOne(args) {
         delete data.updatedAt;
     }
     if (args.id) {
+        const statement = `UPDATE ${getRecordID(table, args.id)} MERGE ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
+        if (await queueTransactionStatement(this, args.req, statement)) {
+            const existing = await this.client.query(`SELECT * FROM ${getRecordID(table, args.id)};`);
+            const existingDoc = normalizeDocument(existing[0]) ?? { id: args.id };
+            return shouldReturn ? applySelect(normalizeDocument({ ...existingDoc, ...data, id: args.id }), args.select) : null;
+        }
         try {
-            const result = await this.client.query(`UPDATE ${getRecordID(table, args.id)} MERGE ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`);
+            const result = await this.client.query(statement);
             return shouldReturn ? applySelect(normalizeDocument(result[0]), args.select) : null;
         }
         catch (error) {
@@ -120,8 +136,12 @@ export const updateOne = async function updateOne(args) {
     if (!found) {
         return null;
     }
+    const statement = `UPDATE ${getRecordID(table, found.id)} MERGE ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
+    if (await queueTransactionStatement(this, args.req, statement)) {
+        return shouldReturn ? applySelect(normalizeDocument({ ...found, ...data }), args.select) : null;
+    }
     try {
-        const result = await this.client.query(`UPDATE ${getRecordID(table, found.id)} MERGE ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`);
+        const result = await this.client.query(statement);
         return shouldReturn ? applySelect(normalizeDocument(result[0]), args.select) : null;
     }
     catch (error) {
@@ -147,13 +167,19 @@ export const deleteOne = async function deleteOne(args) {
     if (!found) {
         return null;
     }
-    await this.client.query(`DELETE ${getRecordID(getTableName(args.collection, this.tablePrefix), found.id)};`);
+    const statement = `DELETE ${getRecordID(getTableName(args.collection, this.tablePrefix), found.id)};`;
+    if (!(await queueTransactionStatement(this, args.req, statement))) {
+        await this.client.query(statement);
+    }
     return args.returning === false ? null : found;
 };
 export const deleteMany = async function deleteMany(args) {
     const table = escapeIdent(getTableName(args.collection, this.tablePrefix));
     const where = buildWhere(args.where);
-    await this.client.query(`DELETE ${table} ${where};`);
+    const statement = `DELETE ${table} ${where};`;
+    if (!(await queueTransactionStatement(this, args.req, statement))) {
+        await this.client.query(statement);
+    }
 };
 export const upsert = async function upsert(args) {
     const existing = await findOne.call(this, {

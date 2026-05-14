@@ -14,8 +14,15 @@ import type { SurrealAdapter } from './index.js'
 
 import { SurrealDBError } from './client.js'
 import { buildWhere, pathToSQL } from './queries/buildWhere.js'
+import { queueTransactionStatement } from './transactions/index.js'
 import { applyDefaults, applySelect, getCollectionConfig, hasTimestamps } from './utilities/fields.js'
 import { escapeIdent, getRecordID, getTableName, literal, normalizeDocument } from './utilities/sql.js'
+
+const randomID = (): string => {
+  const crypto = globalThis.crypto as { randomUUID?: () => string } | undefined
+
+  return crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+}
 
 const getSortSQL = (sort?: string | string[]): string => {
   const sortValues = (Array.isArray(sort) ? sort : sort ? [sort] : [])
@@ -60,10 +67,11 @@ const normalizeDocs = (docs: Array<Record<string, unknown>>, select?: Record<str
 export const create: Create = async function create(this: SurrealAdapter, args) {
   const table = getTableName(args.collection, this.tablePrefix)
   const id = args.customID ?? args.data.id
+  const resolvedID = id ?? randomID()
   const data = applyDefaults({ ...args.data }, getCollectionConfig(this, args.collection)?.fields)
   const shouldReturn = args.returning !== false
 
-  if (id) {
+  if (resolvedID) {
     delete data.id
   }
 
@@ -75,12 +83,15 @@ export const create: Create = async function create(this: SurrealAdapter, args) 
     delete data.updatedAt
   }
 
-  const target = id ? getRecordID(table, id as string | number) : escapeIdent(table)
+  const target = getRecordID(table, resolvedID as string | number)
+  const statement = `CREATE ${target} CONTENT ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
+
+  if (await queueTransactionStatement(this, args.req, statement)) {
+    return shouldReturn ? applySelect(normalizeDocument({ ...data, id: resolvedID }), args.select) : null
+  }
 
   try {
-    const result = await this.client.query(
-      `CREATE ${target} CONTENT ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`,
-    )
+    const result = await this.client.query(statement)
 
     return shouldReturn ? applySelect(normalizeDocument(result[0]), args.select) : null
   } catch (error) {
@@ -151,10 +162,17 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
   }
 
   if (args.id) {
+    const statement = `UPDATE ${getRecordID(table, args.id)} MERGE ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
+
+    if (await queueTransactionStatement(this, args.req, statement)) {
+      const existing = await this.client.query(`SELECT * FROM ${getRecordID(table, args.id)};`)
+      const existingDoc = normalizeDocument(existing[0]) ?? { id: args.id }
+
+      return shouldReturn ? applySelect(normalizeDocument({ ...existingDoc, ...data, id: args.id }), args.select) : null
+    }
+
     try {
-      const result = await this.client.query(
-        `UPDATE ${getRecordID(table, args.id)} MERGE ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`,
-      )
+      const result = await this.client.query(statement)
 
       return shouldReturn ? applySelect(normalizeDocument(result[0]), args.select) : null
     } catch (error) {
@@ -168,10 +186,14 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
     return null
   }
 
+  const statement = `UPDATE ${getRecordID(table, found.id)} MERGE ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
+
+  if (await queueTransactionStatement(this, args.req, statement)) {
+    return shouldReturn ? applySelect(normalizeDocument({ ...found, ...data }), args.select) : null
+  }
+
   try {
-    const result = await this.client.query(
-      `UPDATE ${getRecordID(table, found.id)} MERGE ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`,
-    )
+    const result = await this.client.query(statement)
 
     return shouldReturn ? applySelect(normalizeDocument(result[0]), args.select) : null
   } catch (error) {
@@ -203,7 +225,11 @@ export const deleteOne: DeleteOne = async function deleteOne(this: SurrealAdapte
     return null
   }
 
-  await this.client.query(`DELETE ${getRecordID(getTableName(args.collection, this.tablePrefix), found.id)};`)
+  const statement = `DELETE ${getRecordID(getTableName(args.collection, this.tablePrefix), found.id)};`
+
+  if (!(await queueTransactionStatement(this, args.req, statement))) {
+    await this.client.query(statement)
+  }
 
   return args.returning === false ? null : found
 }
@@ -211,8 +237,11 @@ export const deleteOne: DeleteOne = async function deleteOne(this: SurrealAdapte
 export const deleteMany: DeleteMany = async function deleteMany(this: SurrealAdapter, args) {
   const table = escapeIdent(getTableName(args.collection, this.tablePrefix))
   const where = buildWhere(args.where)
+  const statement = `DELETE ${table} ${where};`
 
-  await this.client.query(`DELETE ${table} ${where};`)
+  if (!(await queueTransactionStatement(this, args.req, statement))) {
+    await this.client.query(statement)
+  }
 }
 
 export const upsert: Upsert = async function upsert(this: SurrealAdapter, args) {

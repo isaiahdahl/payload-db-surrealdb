@@ -106,16 +106,11 @@ const init: NonNullable<BaseDatabaseAdapter['init']> = async function init(this:
     const table = getTableName(collection.slug, this.tablePrefix)
     statements.push(defineTable(table))
     statements.push(...buildIndexStatements(table, getIndexedFields(collection.fields)))
-
-    if (collection.versions) {
-      statements.push(defineTable(getVersionTable(collection.slug, this.tablePrefix)))
-    }
+    statements.push(defineTable(getVersionTable(collection.slug, this.tablePrefix)))
   }
 
   for (const global of this.payload.config.globals ?? []) {
-    if (global.versions) {
-      statements.push(defineTable(getGlobalVersionTable(global.slug, this.tablePrefix)))
-    }
+    statements.push(defineTable(getGlobalVersionTable(global.slug, this.tablePrefix)))
   }
 
   for (const table of systemTables) {

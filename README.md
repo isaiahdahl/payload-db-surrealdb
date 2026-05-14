@@ -62,12 +62,14 @@ This alpha currently has a basic executable adapter scaffold:
 - globals basics
 - migration file scaffolding basics
 - lightweight versions wrappers
+- request-scoped SurrealQL transaction batching with commit/rollback
+- basic latest-version maintenance for collection/global versions and draft querying
 
 ## Known limitations
 
 This is not production ready. Major missing/incomplete areas:
 
-- real request-scoped transactions
+- fully interactive request-scoped transactions with read-your-writes semantics
 - relationship population
 - join fields
 - localization semantics
@@ -108,6 +110,12 @@ Password:  root
 Namespace: payload_demo
 Database:  payload_demo
 ```
+
+## Transaction and versioning notes
+
+The adapter batches write statements for requests that carry `req.transactionID` and executes them in a single SurrealQL `BEGIN TRANSACTION ... COMMIT TRANSACTION` block on commit. Rollback discards queued writes. This gives atomic commit/rollback for adapter writes, including version/latest maintenance statements.
+
+Known concurrency limits remain: HTTP SurrealQL does not provide an interactive transaction session for reads before commit, so reads inside a pending transaction may not see queued writes. Version `latest` flags are maintained atomically at commit time, but high-contention autosave/publish workloads still need broader Payload conformance and concurrency testing before production use.
 
 ## Development smoke test
 

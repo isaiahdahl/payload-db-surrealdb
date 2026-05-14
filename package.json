@@ -23,7 +23,8 @@
     "build": "tsc -p tsconfig.json",
     "clean": "rm -rf dist",
     "prepack": "npm run clean && npm run build",
-    "smoke": "npm run build && node smoke.mjs"
+    "smoke": "npm run build && node smoke.mjs",
+    "test:transactions": "npm run build && node tests/transactions-versions.mjs"
   },
   "keywords": [
     "payload",
