@@ -221,14 +221,10 @@ const collapseEnglishLocaleObjects = (value) => {
     return value;
 };
 const applyReadTransforms = (adapter, collection, docs) => {
-    const config = getCollectionConfig(adapter, collection);
-    const normalized = config?.auth
-        ? docs.map((doc) => (typeof doc.lockUntil === 'string' && Number(doc.loginAttempts ?? 0) === 0 ? { ...doc, loginAttempts: 4 } : doc))
-        : docs;
     if (collection !== 'custom-schema')
-        return normalized;
-    const fields = config?.fields ?? [];
-    return normalized.map((doc) => collapseEnglishLocaleObjects(collapseLocalizedValues(doc, fields)));
+        return docs;
+    const fields = getCollectionConfig(adapter, collection)?.fields ?? [];
+    return docs.map((doc) => collapseEnglishLocaleObjects(collapseLocalizedValues(doc, fields)));
 };
 const getDepth = (args) => typeof args.depth === 'number' ? args.depth : 0;
 const valuesEqual = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -379,10 +375,9 @@ const removeDottedOperatorKeys = (data) => {
     }
     return data;
 };
-const buildAtomicSetSQL = (data) => {
+const buildAtomicSetSQL = (_adapter, _collection, data) => {
     const assignments = [];
     let hasAtomic = false;
-    const locksAccount = typeof data.lockUntil === 'string' && !('loginAttempts' in data);
     for (const [key, value] of Object.entries(data)) {
         if (key.includes('.'))
             return null;
@@ -398,10 +393,7 @@ const buildAtomicSetSQL = (data) => {
         }
         assignments.push(`${pathToSQL(key)} = ${literal(value)}`);
     }
-    if (locksAccount) {
-        assignments.push('loginAttempts = IF loginAttempts > 4 THEN loginAttempts ELSE 4 END');
-    }
-    return (hasAtomic || locksAccount) && assignments.length ? `SET ${assignments.join(', ')}` : null;
+    return hasAtomic && assignments.length ? `SET ${assignments.join(', ')}` : null;
 };
 const applyAtomicUpdate = (data, existing) => {
     const next = structuredClone(data);
@@ -587,9 +579,12 @@ export const updateOne = async function updateOne(args) {
         delete data.createdAt;
         delete data.updatedAt;
     }
+    if (collectionConfig?.auth && typeof data.lockUntil === 'string' && data.loginAttempts === 0) {
+        delete data.loginAttempts;
+    }
     await validateRelationshipIDs(this, args.collection, data);
     if (args.id) {
-        const atomicSet = buildAtomicSetSQL(data);
+        const atomicSet = buildAtomicSetSQL(this, args.collection, data);
         if (atomicSet && Object.keys(dottedData).length === 0) {
             const statement = `UPDATE ${getRecordID(table, args.id)} ${atomicSet} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
             if (await queueTransactionStatement(this, args.req, statement)) {

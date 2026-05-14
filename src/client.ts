@@ -32,6 +32,14 @@ const isDuplicateError = (value: unknown): boolean => {
   return /already exists|duplicate|unique|index/i.test(message)
 }
 
+const isRetryableConflict = (value: unknown): boolean => {
+  const message = typeof value === 'string' ? value : JSON.stringify(value)
+
+  return /transaction conflict|write conflict|can be retried/i.test(message)
+}
+
+const sleep = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+
 const parseJSON = async (response: Response): Promise<SurrealHTTPResult[]> => {
   const text = await response.text()
 
@@ -53,48 +61,59 @@ export const createClient = (adapter: SurrealAdapter): SurrealClient => {
 
   return {
     async query<T = unknown>(sql: string, options: { timeoutMs?: number } = {}): Promise<T> {
-      const controller = new AbortController()
-      const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? adapter.requestTimeoutMs ?? 30_000)
+      const maxAttempts = 5
 
-      let response: Response
-      try {
-        response = await fetch(endpoint, {
-          body: sql,
-          headers: {
-            Accept: 'application/json',
-            'Content-Type': 'application/surrealql',
-            'Surreal-DB': adapter.database,
-            'Surreal-NS': adapter.namespace,
-            ...(auth ? { Authorization: auth } : {}),
-          },
-          method: 'POST',
-          signal: controller.signal,
-        })
-      } catch (error) {
-        throw new SurrealDBError(`Failed to connect to SurrealDB at ${endpoint}`, { cause: error })
-      } finally {
-        clearTimeout(timeout)
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        const controller = new AbortController()
+        const timeout = setTimeout(() => controller.abort(), options.timeoutMs ?? adapter.requestTimeoutMs ?? 30_000)
+
+        let response: Response
+        try {
+          response = await fetch(endpoint, {
+            body: sql,
+            headers: {
+              Accept: 'application/json',
+              'Content-Type': 'application/surrealql',
+              'Surreal-DB': adapter.database,
+              'Surreal-NS': adapter.namespace,
+              ...(auth ? { Authorization: auth } : {}),
+            },
+            method: 'POST',
+            signal: controller.signal,
+          })
+        } catch (error) {
+          throw new SurrealDBError(`Failed to connect to SurrealDB at ${endpoint}`, { cause: error })
+        } finally {
+          clearTimeout(timeout)
+        }
+
+        if (!response.ok) {
+          const body = await response.text()
+          throw new SurrealDBError(`SurrealDB HTTP ${response.status}: ${body}`, {
+            duplicate: isDuplicateError(body),
+            status: response.status,
+          })
+        }
+
+        const statements = await parseJSON(response)
+        const failed = statements.find((statement) => statement.status === 'ERR')
+
+        if (failed) {
+          if (attempt < maxAttempts && isRetryableConflict(failed.result)) {
+            await sleep(10 * attempt)
+            continue
+          }
+
+          throw new SurrealDBError(`SurrealDB query failed: ${JSON.stringify(failed.result)}`, {
+            cause: failed.result,
+            duplicate: isDuplicateError(failed.result),
+          })
+        }
+
+        return statements.at(-1)?.result as T
       }
 
-      if (!response.ok) {
-        const body = await response.text()
-        throw new SurrealDBError(`SurrealDB HTTP ${response.status}: ${body}`, {
-          duplicate: isDuplicateError(body),
-          status: response.status,
-        })
-      }
-
-      const statements = await parseJSON(response)
-      const failed = statements.find((statement) => statement.status === 'ERR')
-
-      if (failed) {
-        throw new SurrealDBError(`SurrealDB query failed: ${JSON.stringify(failed.result)}`, {
-          cause: failed.result,
-          duplicate: isDuplicateError(failed.result),
-        })
-      }
-
-      return statements.at(-1)?.result as T
+      throw new SurrealDBError('SurrealDB query failed after retrying transaction conflicts')
     },
   }
 }

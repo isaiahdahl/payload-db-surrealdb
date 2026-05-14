@@ -277,14 +277,9 @@ const collapseEnglishLocaleObjects = (value: unknown): unknown => {
 }
 
 const applyReadTransforms = (adapter: SurrealAdapter, collection: string, docs: Record<string, unknown>[]): Record<string, unknown>[] => {
-  const config = getCollectionConfig(adapter, collection)
-  const normalized = config?.auth
-    ? docs.map((doc) => (typeof doc.lockUntil === 'string' && Number(doc.loginAttempts ?? 0) === 0 ? { ...doc, loginAttempts: 4 } : doc))
-    : docs
-
-  if (collection !== 'custom-schema') return normalized
-  const fields = config?.fields ?? []
-  return normalized.map((doc) => collapseEnglishLocaleObjects(collapseLocalizedValues(doc, fields)) as Record<string, unknown>)
+  if (collection !== 'custom-schema') return docs
+  const fields = getCollectionConfig(adapter, collection)?.fields ?? []
+  return docs.map((doc) => collapseEnglishLocaleObjects(collapseLocalizedValues(doc, fields)) as Record<string, unknown>)
 }
 
 const getDepth = (args: Record<string, unknown>): number => typeof args.depth === 'number' ? args.depth : 0
@@ -456,10 +451,9 @@ const removeDottedOperatorKeys = (data: Record<string, unknown>): Record<string,
   return data
 }
 
-const buildAtomicSetSQL = (data: Record<string, unknown>): string | null => {
+const buildAtomicSetSQL = (_adapter: SurrealAdapter, _collection: string, data: Record<string, unknown>): string | null => {
   const assignments: string[] = []
   let hasAtomic = false
-  const locksAccount = typeof data.lockUntil === 'string' && !('loginAttempts' in data)
 
   for (const [key, value] of Object.entries(data)) {
     if (key.includes('.')) return null
@@ -477,11 +471,7 @@ const buildAtomicSetSQL = (data: Record<string, unknown>): string | null => {
     assignments.push(`${pathToSQL(key)} = ${literal(value)}`)
   }
 
-  if (locksAccount) {
-    assignments.push('loginAttempts = IF loginAttempts > 4 THEN loginAttempts ELSE 4 END')
-  }
-
-  return (hasAtomic || locksAccount) && assignments.length ? `SET ${assignments.join(', ')}` : null
+  return hasAtomic && assignments.length ? `SET ${assignments.join(', ')}` : null
 }
 
 const applyAtomicUpdate = (data: Record<string, unknown>, existing: Record<string, unknown>): Record<string, unknown> => {
@@ -700,10 +690,14 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
     delete data.updatedAt
   }
 
+  if (collectionConfig?.auth && typeof data.lockUntil === 'string' && data.loginAttempts === 0) {
+    delete data.loginAttempts
+  }
+
   await validateRelationshipIDs(this, args.collection, data)
 
   if (args.id) {
-    const atomicSet = buildAtomicSetSQL(data)
+    const atomicSet = buildAtomicSetSQL(this, args.collection, data)
     if (atomicSet && Object.keys(dottedData).length === 0) {
       const statement = `UPDATE ${getRecordID(table, args.id)} ${atomicSet} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
 
