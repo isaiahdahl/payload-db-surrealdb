@@ -33,8 +33,31 @@ const getVirtualPath = (adapter: SurrealAdapter, collection: string, field: stri
   return typeof candidate?.virtual === 'string' ? candidate.virtual : undefined
 }
 
+const getVersionBaseCollection = (adapter: SurrealAdapter, collection: string): string | undefined => {
+  if (!collection.endsWith('_versions')) return undefined
+  const baseCollection = collection.slice(0, -'_versions'.length)
+
+  return getCollectionConfig(adapter, baseCollection) ? baseCollection : undefined
+}
+
 const getVirtualAlias = (adapter: SurrealAdapter, collection: string, path: string): string | undefined => {
   const [root, ...rest] = path.split('.')
+
+  if (root === 'version') {
+    const baseCollection = getVersionBaseCollection(adapter, collection)
+    const versionAlias = baseCollection ? getVirtualAlias(adapter, baseCollection, rest.join('.')) : undefined
+
+    return versionAlias ? ['version', versionAlias].join('.') : undefined
+  }
+
+  const baseCollection = getVersionBaseCollection(adapter, collection)
+
+  if (baseCollection) {
+    const versionAlias = getVirtualAlias(adapter, baseCollection, path)
+
+    return versionAlias ? ['version', versionAlias].join('.') : undefined
+  }
+
   const virtualPath = getVirtualPath(adapter, collection, root)
 
   return virtualPath ? [virtualPath, ...rest].filter(Boolean).join('.') : undefined
@@ -42,6 +65,18 @@ const getVirtualAlias = (adapter: SurrealAdapter, collection: string, path: stri
 
 const isRelationshipPath = (adapter: SurrealAdapter, collection: string, path: string): boolean => {
   const [root, ...rest] = path.split('.')
+  if (root === 'version') {
+    const baseCollection = getVersionBaseCollection(adapter, collection)
+
+    return baseCollection ? isRelationshipPath(adapter, baseCollection, rest.join('.')) : false
+  }
+
+  const baseCollection = getVersionBaseCollection(adapter, collection)
+
+  if (baseCollection) {
+    return isRelationshipPath(adapter, baseCollection, path)
+  }
+
   if (!rest.length) return false
   const field = getCollectionConfig(adapter, collection)?.fields?.find((item: { name?: string }) => item.name === root) as { type?: string } | undefined
   return field?.type === 'relationship' || field?.type === 'upload'

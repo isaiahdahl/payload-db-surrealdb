@@ -121,6 +121,12 @@ const getRelationCollections = (field) => {
     return typeof field.relationTo === 'string' ? [field.relationTo] : [];
 };
 const normalizeFetchedDocs = (docs) => (docs ?? []).map((doc) => normalizeDocument(doc)).filter(Boolean);
+const getVersionBaseCollection = (adapter, collection) => {
+    if (!collection.endsWith('_versions'))
+        return undefined;
+    const baseCollection = collection.slice(0, -'_versions'.length);
+    return getCollectionConfig(adapter, baseCollection) ? baseCollection : undefined;
+};
 const fetchByIDs = async (adapter, collection, ids, depth) => {
     const uniqueIDs = [...new Set(ids.filter((id) => id !== null && id !== undefined).map(String))];
     const docsByID = new Map();
@@ -297,6 +303,14 @@ const resolveJoinFields = async (adapter, collection, docs, depth) => {
 export const transformRelationshipReads = async (adapter, collection, docs, depth = 0) => {
     await populateRelationshipFields(adapter, collection, docs, depth);
     await resolveJoinFields(adapter, collection, docs, depth);
+    const baseCollection = getVersionBaseCollection(adapter, collection);
+    const versionDocs = baseCollection
+        ? docs.map((doc) => doc.version).filter(isPlainObject)
+        : [];
+    if (baseCollection && versionDocs.length) {
+        await populateRelationshipFields(adapter, baseCollection, versionDocs, depth);
+        await resolveJoinFields(adapter, baseCollection, versionDocs, depth);
+    }
     return docs;
 };
 export const transformRelationshipWhere = (collectionConfig, where) => {

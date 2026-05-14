@@ -193,6 +193,13 @@ const getRelationCollections = (field: Field): string[] => {
 const normalizeFetchedDocs = (docs: Record<string, unknown>[] | null | undefined): Record<string, unknown>[] =>
   (docs ?? []).map((doc) => normalizeDocument(doc)).filter(Boolean) as Record<string, unknown>[]
 
+const getVersionBaseCollection = (adapter: SurrealAdapter, collection: string): string | undefined => {
+  if (!collection.endsWith('_versions')) return undefined
+  const baseCollection = collection.slice(0, -'_versions'.length)
+
+  return getCollectionConfig(adapter, baseCollection) ? baseCollection : undefined
+}
+
 const fetchByIDs = async (
   adapter: SurrealAdapter,
   collection: string,
@@ -448,6 +455,16 @@ export const transformRelationshipReads = async <T extends Record<string, unknow
 ): Promise<T[]> => {
   await populateRelationshipFields(adapter, collection, docs, depth)
   await resolveJoinFields(adapter, collection, docs, depth)
+
+  const baseCollection = getVersionBaseCollection(adapter, collection)
+  const versionDocs = baseCollection
+    ? docs.map((doc) => doc.version).filter(isPlainObject)
+    : []
+
+  if (baseCollection && versionDocs.length) {
+    await populateRelationshipFields(adapter, baseCollection, versionDocs, depth)
+    await resolveJoinFields(adapter, baseCollection, versionDocs, depth)
+  }
 
   return docs
 }
