@@ -257,6 +257,50 @@ const removeValues = (target: unknown[], value: unknown): unknown[] => {
   return target.filter((item) => !values.some((remove) => valuesEqual(remove, item)))
 }
 
+const getAtomicValueAtPath = (doc: Record<string, unknown>, path: string): unknown => {
+  if (path === 'id') {
+    return doc.id
+  }
+
+  return path.split('.').reduce<unknown>((value, part) => {
+    if (Array.isArray(value)) {
+      const index = Number(part)
+
+      return Number.isInteger(index) ? value[index] : undefined
+    }
+
+    if (value && typeof value === 'object') {
+      return (value as Record<string, unknown>)[part]
+    }
+
+    return undefined
+  }, doc)
+}
+
+const setAtomicValueAtPath = (doc: Record<string, unknown>, path: string, value: unknown): void => {
+  const parts = path.split('.')
+  let target: unknown = doc
+
+  for (const [index, part] of parts.entries()) {
+    if (!target || typeof target !== 'object') {
+      return
+    }
+
+    if (index === parts.length - 1) {
+      if (Array.isArray(target)) {
+        const arrayIndex = Number(part)
+        if (Number.isInteger(arrayIndex)) target[arrayIndex] = value
+      } else {
+        ;(target as Record<string, unknown>)[part] = value
+      }
+
+      return
+    }
+
+    target = Array.isArray(target) ? target[Number(part)] : (target as Record<string, unknown>)[part]
+  }
+}
+
 const validateUniqueIndexes = async (adapter: SurrealAdapter, collection: string, data: Record<string, unknown>, id?: unknown): Promise<void> => {
   const config = getCollectionConfig(adapter, collection) as { fields?: Array<{ name?: string; unique?: boolean }>; indexes?: Array<{ fields?: string[]; unique?: boolean }> } | undefined
   const table = escapeIdent(getTableName(collection, adapter.tablePrefix))
@@ -344,11 +388,16 @@ const refreshNestedRowIDs = (value: Record<string, unknown>, fields: any[] = [])
 const applyAtomicUpdate = (data: Record<string, unknown>, existing: Record<string, unknown>): Record<string, unknown> => {
   const next = structuredClone(data)
 
-  const visit = (obj: Record<string, unknown>, prefix = '') => {
+  const visit = (obj: Record<string, unknown> | unknown[], prefix = '') => {
     for (const [key, value] of Object.entries(obj)) {
       const path = prefix ? `${prefix}.${key}` : key
 
-      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      if (Array.isArray(value)) {
+        visit(value, path)
+        continue
+      }
+
+      if (!value || typeof value !== 'object') {
         continue
       }
 
@@ -360,14 +409,14 @@ const applyAtomicUpdate = (data: Record<string, unknown>, existing: Record<strin
         continue
       }
 
-      const current = getValueAtPath(existing, path)
+      const current = getAtomicValueAtPath(existing, path)
 
       if ('$inc' in operators) {
-        setValueAtPath(next, path, Number(current ?? 0) + Number(operators.$inc ?? 0))
+        setAtomicValueAtPath(next, path, Number(current ?? 0) + Number(operators.$inc ?? 0))
       } else if ('$push' in operators) {
-        setValueAtPath(next, path, appendUnique(Array.isArray(current) ? current : [], operators.$push))
+        setAtomicValueAtPath(next, path, appendUnique(Array.isArray(current) ? current : [], operators.$push))
       } else if ('$remove' in operators) {
-        setValueAtPath(next, path, removeValues(Array.isArray(current) ? current : [], operators.$remove))
+        setAtomicValueAtPath(next, path, removeValues(Array.isArray(current) ? current : [], operators.$remove))
       }
     }
   }

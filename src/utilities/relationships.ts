@@ -19,6 +19,10 @@ type Field = {
   on?: string
   relationTo?: string | string[]
   sort?: string | string[]
+  tabs?: Array<{
+    fields?: Field[]
+    name?: string
+  }>
   type?: string
 }
 
@@ -88,6 +92,10 @@ const normalizeRelationshipValue = (field: Field, value: unknown): unknown => {
 }
 
 const getNestedFields = (field: Field, value?: unknown): Field[] => {
+  if (field.type === 'tabs') {
+    return (field.tabs ?? []).flatMap((tab) => tab.fields ?? [])
+  }
+
   if (field.type === 'blocks' && isPlainObject(value)) {
     const block = (field.blocks ?? []).find((candidate) => candidate.slug === value.blockType)
 
@@ -130,6 +138,20 @@ const transformRelationshipValueWrites = (value: unknown, field: Field): unknown
 
 export const transformRelationshipWrites = (data: Record<string, unknown>, fields: Field[] = []): Record<string, unknown> => {
   for (const field of fields) {
+    if (field.type === 'tabs') {
+      for (const tab of field.tabs ?? []) {
+        if (tab.name) {
+          if (isPlainObject(data[tab.name])) {
+            transformRelationshipWrites(data[tab.name] as Record<string, unknown>, tab.fields ?? [])
+          }
+        } else {
+          transformRelationshipWrites(data, tab.fields ?? [])
+        }
+      }
+
+      continue
+    }
+
     if (!field.name || !(field.name in data)) {
       continue
     }
@@ -210,17 +232,40 @@ const populateRelationshipFields = async (
     return
   }
 
-  const fields = collectRelationshipFields(getCollectionConfig(adapter, collection)?.fields)
+  const populateField = async (field: Field, targetDocs: Record<string, unknown>[]): Promise<void> => {
+    if (!field.name || !targetDocs.length) {
+      return
+    }
 
-  for (const field of fields) {
-    if (!field.name) {
-      continue
+    if (field.localized) {
+      const localeEntries: Array<{ doc: Record<string, unknown>; locale: string; wrapper: Record<string, unknown> }> = []
+
+      for (const doc of targetDocs) {
+        const value = doc[field.name]
+
+        if (!isPlainObject(value)) {
+          continue
+        }
+
+        for (const [locale, localeValue] of Object.entries(value)) {
+          const wrapper = { [field.name]: localeValue }
+          localeEntries.push({ doc, locale, wrapper })
+        }
+      }
+
+      await populateField({ ...field, localized: false }, localeEntries.map((entry) => entry.wrapper))
+
+      for (const { doc, locale, wrapper } of localeEntries) {
+        ;(doc[field.name] as Record<string, unknown>)[locale] = wrapper[field.name]
+      }
+
+      return
     }
 
     if (isPolymorphic(field)) {
       const idsByCollection = new Map<string, unknown[]>()
 
-      for (const doc of docs) {
+      for (const doc of targetDocs) {
         const value = doc[field.name]
         const refs = field.hasMany && Array.isArray(value) ? value : value ? [value] : []
 
@@ -237,7 +282,7 @@ const populateRelationshipFields = async (
         docsByCollection.set(relationTo, await fetchByIDs(adapter, relationTo, ids, depth - 1))
       }
 
-      for (const doc of docs) {
+      for (const doc of targetDocs) {
         const value = doc[field.name]
         const populateRef = (ref: unknown) => {
           if (!isPlainObject(ref) || typeof ref.relationTo !== 'string') {
@@ -253,22 +298,22 @@ const populateRelationshipFields = async (
         doc[field.name] = field.hasMany && Array.isArray(value) ? value.map(populateRef) : populateRef(value)
       }
 
-      continue
+      return
     }
 
     const relationTo = getRelationCollections(field)[0]
 
     if (!relationTo) {
-      continue
+      return
     }
 
-    const ids = docs.flatMap((doc) => {
-      const value = doc[field.name]
+    const ids = targetDocs.flatMap((doc) => {
+      const value = doc[field.name!]
       return field.hasMany && Array.isArray(value) ? value : value ? [value] : []
     })
     const related = await fetchByIDs(adapter, relationTo, ids, depth - 1)
 
-    for (const doc of docs) {
+    for (const doc of targetDocs) {
       const value = doc[field.name]
       doc[field.name] = field.hasMany && Array.isArray(value)
         ? value.map((id) => related.get(String(id)) ?? id)
@@ -277,6 +322,63 @@ const populateRelationshipFields = async (
           : related.get(String(value)) ?? value
     }
   }
+
+  const populateFields = async (targetDocs: Record<string, unknown>[], fields: Field[] = []): Promise<void> => {
+    for (const field of fields) {
+      if (field.type === 'tabs') {
+        for (const tab of field.tabs ?? []) {
+          if (tab.name) {
+            await populateFields(
+              targetDocs.map((doc) => doc[tab.name!]).filter(isPlainObject),
+              tab.fields ?? [],
+            )
+          } else {
+            await populateFields(targetDocs, tab.fields ?? [])
+          }
+        }
+
+        continue
+      }
+
+      if (isRelationshipField(field)) {
+        await populateField(field, targetDocs)
+        continue
+      }
+
+      if (!field.name) {
+        continue
+      }
+
+      if (field.type === 'array' || field.type === 'blocks') {
+        for (const doc of targetDocs) {
+          const rows = doc[field.name]
+
+          if (!Array.isArray(rows)) {
+            continue
+          }
+
+          for (const row of rows) {
+            if (isPlainObject(row)) {
+              await populateFields([row], getNestedFields(field, row))
+            }
+          }
+        }
+
+        continue
+      }
+
+      const nestedFields = getNestedFields(field)
+
+      if (nestedFields.length) {
+        await populateFields(
+          targetDocs.map((doc) => doc[field.name!]).filter(isPlainObject),
+          nestedFields,
+        )
+      }
+    }
+  }
+
+  await populateFields(docs, getCollectionConfig(adapter, collection)?.fields)
 }
 
 const resolveJoinFields = async (

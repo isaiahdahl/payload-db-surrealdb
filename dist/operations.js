@@ -1,7 +1,7 @@
 import { ValidationError } from 'payload';
 import { pathToSQL } from './queries/buildWhere.js';
 import { queueTransactionStatement } from './transactions/index.js';
-import { applyDefaults, applySelect, getCollectionConfig, getValueAtPath, hasTimestamps, setValueAtPath } from './utilities/fields.js';
+import { applyDefaults, applySelect, getCollectionConfig, getValueAtPath, hasTimestamps } from './utilities/fields.js';
 import { buildRelationshipAwareWhere, transformRelationshipReads, transformRelationshipWrites } from './utilities/relationships.js';
 import { escapeIdent, getRecordID, getTableName, literal, normalizeDocument } from './utilities/sql.js';
 const randomID = () => {
@@ -204,6 +204,43 @@ const removeValues = (target, value) => {
     const values = Array.isArray(value) ? value : [value];
     return target.filter((item) => !values.some((remove) => valuesEqual(remove, item)));
 };
+const getAtomicValueAtPath = (doc, path) => {
+    if (path === 'id') {
+        return doc.id;
+    }
+    return path.split('.').reduce((value, part) => {
+        if (Array.isArray(value)) {
+            const index = Number(part);
+            return Number.isInteger(index) ? value[index] : undefined;
+        }
+        if (value && typeof value === 'object') {
+            return value[part];
+        }
+        return undefined;
+    }, doc);
+};
+const setAtomicValueAtPath = (doc, path, value) => {
+    const parts = path.split('.');
+    let target = doc;
+    for (const [index, part] of parts.entries()) {
+        if (!target || typeof target !== 'object') {
+            return;
+        }
+        if (index === parts.length - 1) {
+            if (Array.isArray(target)) {
+                const arrayIndex = Number(part);
+                if (Number.isInteger(arrayIndex))
+                    target[arrayIndex] = value;
+            }
+            else {
+                ;
+                target[part] = value;
+            }
+            return;
+        }
+        target = Array.isArray(target) ? target[Number(part)] : target[part];
+    }
+};
 const validateUniqueIndexes = async (adapter, collection, data, id) => {
     const config = getCollectionConfig(adapter, collection);
     const table = escapeIdent(getTableName(collection, adapter.tablePrefix));
@@ -288,7 +325,11 @@ const applyAtomicUpdate = (data, existing) => {
     const visit = (obj, prefix = '') => {
         for (const [key, value] of Object.entries(obj)) {
             const path = prefix ? `${prefix}.${key}` : key;
-            if (!value || typeof value !== 'object' || Array.isArray(value)) {
+            if (Array.isArray(value)) {
+                visit(value, path);
+                continue;
+            }
+            if (!value || typeof value !== 'object') {
                 continue;
             }
             const operators = value;
@@ -297,15 +338,15 @@ const applyAtomicUpdate = (data, existing) => {
                 visit(operators, path);
                 continue;
             }
-            const current = getValueAtPath(existing, path);
+            const current = getAtomicValueAtPath(existing, path);
             if ('$inc' in operators) {
-                setValueAtPath(next, path, Number(current ?? 0) + Number(operators.$inc ?? 0));
+                setAtomicValueAtPath(next, path, Number(current ?? 0) + Number(operators.$inc ?? 0));
             }
             else if ('$push' in operators) {
-                setValueAtPath(next, path, appendUnique(Array.isArray(current) ? current : [], operators.$push));
+                setAtomicValueAtPath(next, path, appendUnique(Array.isArray(current) ? current : [], operators.$push));
             }
             else if ('$remove' in operators) {
-                setValueAtPath(next, path, removeValues(Array.isArray(current) ? current : [], operators.$remove));
+                setAtomicValueAtPath(next, path, removeValues(Array.isArray(current) ? current : [], operators.$remove));
             }
         }
     };

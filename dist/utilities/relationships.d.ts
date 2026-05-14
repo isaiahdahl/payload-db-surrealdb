@@ -14,6 +14,10 @@ type Field = {
     on?: string;
     relationTo?: string | string[];
     sort?: string | string[];
+    tabs?: Array<{
+        fields?: Field[];
+        name?: string;
+    }>;
     type?: string;
 };
 export declare const relationshipStorageSemantics: {
