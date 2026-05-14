@@ -9,6 +9,7 @@ export type SurrealAdapterArgs = {
     database?: string;
     migrationDir?: string;
     namespace?: string;
+    requestTimeoutMs?: number;
     tablePrefix?: string;
     url?: string;
 };

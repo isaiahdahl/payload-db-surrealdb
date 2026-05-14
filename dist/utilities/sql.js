@@ -7,7 +7,12 @@ export const literal = (value) => {
     }
     return JSON.stringify(value);
 };
-export const getTableName = (slug) => slug.replaceAll('-', '_');
+export const normalizeTableComponent = (value) => value.replaceAll('-', '_');
+export const getTableName = (slug, tablePrefix) => {
+    const table = normalizeTableComponent(slug);
+    const prefix = tablePrefix ? normalizeTableComponent(tablePrefix).replace(/_+$/, '') : '';
+    return prefix ? `${prefix}_${table}` : table;
+};
 export const getRecordID = (table, id) => {
     return `type::record(${literal(table)}, ${literal(String(id))})`;
 };
@@ -15,13 +20,12 @@ export const normalizeID = (id) => {
     if (typeof id === 'string') {
         const separatorIndex = id.indexOf(':');
         const value = separatorIndex > -1 ? id.slice(separatorIndex + 1) : id;
-        const cleaned = value.replace(/^`|`$/g, '');
-        return /^\d+$/.test(cleaned) ? Number(cleaned) : cleaned;
+        return value.replace(/^`|`$/g, '');
     }
     if (id && typeof id === 'object') {
         const candidate = id;
         if (candidate.id !== undefined) {
-            return normalizeID(String(candidate.id));
+            return normalizeID(candidate.id);
         }
     }
     return String(id);

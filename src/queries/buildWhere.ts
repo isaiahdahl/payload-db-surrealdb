@@ -1,13 +1,19 @@
 import type { Where } from 'payload'
 
-import { literal } from '../utilities/sql.js'
+import { escapeIdent, literal } from '../utilities/sql.js'
 
-const pathToSQL = (path: string): string => {
+const simpleIdentifier = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+export const pathToSQL = (path: string): string => {
   if (path === 'id') {
     return 'meta::id(id)'
   }
 
-  return path.split('.').map((part) => `.${part}`).join('').slice(1)
+  return path
+    .split('.')
+    .filter(Boolean)
+    .map((part) => (simpleIdentifier.test(part) ? part : escapeIdent(part)))
+    .join('.')
 }
 
 const valueToSQL = (value: unknown): string => literal(value)
@@ -29,9 +35,9 @@ const operatorToSQL = (field: string, operator: string, value: unknown): string 
     case 'less_than_equal':
       return `${path} <= ${valueToSQL(value)}`
     case 'in':
-      return `${path} IN ${valueToSQL(value)}`
+      return `${path} IN ${valueToSQL(Array.isArray(value) ? value : [value])}`
     case 'not_in':
-      return `${path} NOT IN ${valueToSQL(value)}`
+      return `${path} NOT IN ${valueToSQL(Array.isArray(value) ? value : [value])}`
     case 'exists':
       return value ? `${path} != NONE` : `${path} = NONE`
     case 'like':
@@ -50,16 +56,11 @@ const buildClause = (where?: Where): string => {
   }
 
   const clauses = Object.entries(where).flatMap(([key, value]) => {
-    if (key === 'and' && Array.isArray(value)) {
+    if ((key === 'and' || key === 'or') && Array.isArray(value)) {
+      const joiner = key === 'and' ? ' AND ' : ' OR '
       const nested = value.map((entry) => buildClause(entry as Where)).filter(Boolean)
 
-      return nested.length ? [`(${nested.join(' AND ')})`] : []
-    }
-
-    if (key === 'or' && Array.isArray(value)) {
-      const nested = value.map((entry) => buildClause(entry as Where)).filter(Boolean)
-
-      return nested.length ? [`(${nested.join(' OR ')})`] : []
+      return nested.length ? [`(${nested.join(joiner)})`] : []
     }
 
     if (value && typeof value === 'object' && !Array.isArray(value)) {

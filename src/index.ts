@@ -1,8 +1,8 @@
 import type { BaseDatabaseAdapter, DatabaseAdapterObj, FindDistinct, Payload, UpdateJobs } from 'payload'
 
-import type { SurrealClient } from './client.js'
+import type { SurrealClient, SurrealHTTPResult } from './client.js'
 
-import { createClient } from './client.js'
+import { createClient, SurrealDBError } from './client.js'
 import { createGlobal, findGlobal, updateGlobal } from './globals.js'
 import {
   createMigration,
@@ -25,7 +25,8 @@ import {
   upsert,
 } from './operations.js'
 import { beginTransaction, commitTransaction, rollbackTransaction } from './transactions/index.js'
-import { getTableName } from './utilities/sql.js'
+import { getIndexedFields, getValueAtPath } from './utilities/fields.js'
+import { escapeIdent, getTableName } from './utilities/sql.js'
 import {
   countGlobalVersions,
   countVersions,
@@ -49,6 +50,7 @@ export type SurrealAdapterArgs = {
   database?: string
   migrationDir?: string
   namespace?: string
+  requestTimeoutMs?: number
   tablePrefix?: string
   url?: string
 }
@@ -59,7 +61,7 @@ export type SurrealAdapter = BaseDatabaseAdapter &
     client: SurrealClient
   }
 
-const createAdapter = <T extends Record<string, unknown>>(args: T): T => ({
+const createAdapter = <T>(args: T): T => ({
   bulkOperationsSingleTransaction: false,
   migrationDir: 'migrations',
   ...args,
@@ -67,19 +69,73 @@ const createAdapter = <T extends Record<string, unknown>>(args: T): T => ({
 
 const resolveMigrationDir = (dir?: string): string => dir ?? 'migrations'
 
+const systemTables = [
+  'payload_globals',
+  'payload_migrations',
+  'payload_jobs',
+  'payload_preferences',
+  'payload_locked_documents',
+  'payload_trash',
+]
+
+const defineTable = (name: string): string => `DEFINE TABLE IF NOT EXISTS ${escapeIdent(name)} SCHEMALESS;`
+
+const getVersionTable = (slug: string, tablePrefix?: string): string => getTableName(`${slug}_versions`, tablePrefix)
+const getGlobalVersionTable = (slug: string, tablePrefix?: string): string => getTableName(`global_${slug}_versions`, tablePrefix)
+
+const getIndexName = (table: string, field: string, unique: boolean): string => {
+  const suffix = unique ? 'unique' : 'idx'
+
+  return `${table}_${field.replace(/\W+/g, '_')}_${suffix}`
+}
+
+const buildIndexStatements = (table: string, fields: ReturnType<typeof getIndexedFields>): string[] => {
+  return fields.map((field) => {
+    const unique = field.unique ? ' UNIQUE' : ''
+
+    return `DEFINE INDEX IF NOT EXISTS ${escapeIdent(getIndexName(table, field.name, field.unique))} ON TABLE ${escapeIdent(table)} FIELDS ${escapeIdent(field.name)}${unique};`
+  })
+}
+
 const init: NonNullable<BaseDatabaseAdapter['init']> = async function init(this: SurrealAdapter) {
   await connect.call(this)
 
   const statements: string[] = []
 
   for (const collection of this.payload.config.collections) {
-    statements.push(`DEFINE TABLE IF NOT EXISTS ⟨${getTableName(collection.slug)}⟩ SCHEMALESS;`)
+    const table = getTableName(collection.slug, this.tablePrefix)
+    statements.push(defineTable(table))
+    statements.push(...buildIndexStatements(table, getIndexedFields(collection.fields)))
+
+    if (collection.versions) {
+      statements.push(defineTable(getVersionTable(collection.slug, this.tablePrefix)))
+    }
   }
 
-  statements.push('DEFINE TABLE IF NOT EXISTS payload_globals SCHEMALESS;')
-  statements.push('DEFINE TABLE IF NOT EXISTS payload_migrations SCHEMALESS;')
+  for (const global of this.payload.config.globals ?? []) {
+    if (global.versions) {
+      statements.push(defineTable(getGlobalVersionTable(global.slug, this.tablePrefix)))
+    }
+  }
+
+  for (const table of systemTables) {
+    statements.push(defineTable(getTableName(table, this.tablePrefix)))
+  }
 
   await this.client.query(statements.join('\n'))
+}
+
+const parseBootstrapStatements = async (response: Response): Promise<SurrealHTTPResult[]> => {
+  const text = await response.text()
+
+  try {
+    return JSON.parse(text) as SurrealHTTPResult[]
+  } catch (error) {
+    throw new SurrealDBError(`SurrealDB bootstrap returned invalid JSON: ${text.slice(0, 500)}`, {
+      cause: error,
+      status: response.status,
+    })
+  }
 }
 
 const connect: NonNullable<BaseDatabaseAdapter['connect']> = async function connect(this: SurrealAdapter) {
@@ -87,16 +143,43 @@ const connect: NonNullable<BaseDatabaseAdapter['connect']> = async function conn
   const auth = this.auth
     ? `Basic ${Buffer.from(`${this.auth.username}:${this.auth.password}`).toString('base64')}`
     : undefined
+  const controller = new AbortController()
+  const timeout = setTimeout(() => controller.abort(), this.requestTimeoutMs ?? 30_000)
 
-  await fetch(bootstrapEndpoint, {
-    body: `DEFINE NAMESPACE ${this.namespace}; USE NS ${this.namespace}; DEFINE DATABASE ${this.database};`,
-    headers: {
-      Accept: 'application/json',
-      'Content-Type': 'application/surrealql',
-      ...(auth ? { Authorization: auth } : {}),
-    },
-    method: 'POST',
-  })
+  let response: Response
+  try {
+    response = await fetch(bootstrapEndpoint, {
+      body: `DEFINE NAMESPACE IF NOT EXISTS ${escapeIdent(this.namespace)}; USE NS ${escapeIdent(this.namespace)}; DEFINE DATABASE IF NOT EXISTS ${escapeIdent(this.database)};`,
+      headers: {
+        Accept: 'application/json',
+        'Content-Type': 'application/surrealql',
+        ...(auth ? { Authorization: auth } : {}),
+      },
+      method: 'POST',
+      signal: controller.signal,
+    })
+  } catch (error) {
+    throw new SurrealDBError(`Failed to bootstrap SurrealDB at ${bootstrapEndpoint}`, { cause: error })
+  } finally {
+    clearTimeout(timeout)
+  }
+
+  if (!response.ok) {
+    throw new SurrealDBError(`SurrealDB bootstrap HTTP ${response.status}: ${await response.text()}`, {
+      status: response.status,
+    })
+  }
+
+  const statements = await parseBootstrapStatements(response)
+  const failed = statements.find((statement) => statement.status === 'ERR')
+
+  if (failed) {
+    throw new SurrealDBError(`SurrealDB bootstrap failed: ${JSON.stringify(failed.result)}`, {
+      cause: failed.result,
+    })
+  }
+
+  await this.client.query('RETURN true;', { timeoutMs: this.requestTimeoutMs })
 }
 
 const destroy: NonNullable<BaseDatabaseAdapter['destroy']> = async function destroy() {}
@@ -104,22 +187,42 @@ const destroy: NonNullable<BaseDatabaseAdapter['destroy']> = async function dest
 const findDistinct: FindDistinct = async function findDistinct(this: SurrealAdapter, args) {
   const result = await find.call(this, {
     collection: args.collection,
-    limit: args.limit,
-    page: args.page,
+    limit: 0,
     req: args.req,
-    sort: args.sort,
+    sort: args.sort ?? args.field,
     where: args.where,
   })
-  const values = [...new Set(result.docs.map((doc) => doc[args.field]))].map((value) => ({ [args.field]: value }))
+  const seen = new Set<string>()
+  const allValues = []
+
+  for (const doc of result.docs) {
+    const value = getValueAtPath(doc, args.field)
+    const key = JSON.stringify(value)
+
+    if (!seen.has(key)) {
+      seen.add(key)
+      allValues.push({ [args.field]: value })
+    }
+  }
+
+  const limit = args.limit ?? allValues.length
+  const page = args.page ?? 1
+  const skip = (args as { skip?: number }).skip
+  const start = skip ?? Math.max(page - 1, 0) * (limit > 0 ? limit : 0)
+  const values = limit > 0 ? allValues.slice(start, start + limit) : allValues
+  const totalPages = limit > 0 ? Math.ceil(allValues.length / limit) : 1
+  const currentPage = skip !== undefined && limit > 0 ? Math.floor(start / limit) + 1 : page
 
   return {
-    hasNextPage: false,
-    hasPrevPage: false,
-    limit: args.limit ?? values.length,
-    page: args.page ?? 1,
-    pagingCounter: 1,
-    totalDocs: values.length,
-    totalPages: 1,
+    hasNextPage: limit > 0 ? currentPage < totalPages : false,
+    hasPrevPage: currentPage > 1,
+    limit,
+    nextPage: limit > 0 && currentPage < totalPages ? currentPage + 1 : null,
+    page: currentPage,
+    pagingCounter: allValues.length > 0 ? start + 1 : 0,
+    prevPage: currentPage > 1 ? currentPage - 1 : null,
+    totalDocs: allValues.length,
+    totalPages,
     values,
   }
 }
@@ -142,6 +245,8 @@ export function surrealAdapter(args: SurrealAdapterArgs = {}): DatabaseAdapterOb
       auth: args.auth ?? { password: 'root', username: 'root' },
       database: args.database ?? 'payload',
       namespace: args.namespace ?? 'payload',
+      requestTimeoutMs: args.requestTimeoutMs,
+      tablePrefix: args.tablePrefix,
       url: args.url ?? 'http://localhost:8000',
     }
 

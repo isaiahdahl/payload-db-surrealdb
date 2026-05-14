@@ -18,6 +18,7 @@
     "README.md",
     "LICENSE"
   ],
+  "sideEffects": false,
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "clean": "rm -rf dist",
@@ -45,9 +46,11 @@
     "node": ">=20"
   },
   "peerDependencies": {
-    "payload": ">=3.0.0 || >=4.0.0-beta.0"
+    "payload": ">=3.0.0 <4.0.0"
   },
   "devDependencies": {
+    "@types/node": "^22.19.19",
+    "payload": "^3.84.1",
     "typescript": "^5.7.3"
   },
   "publishConfig": {
