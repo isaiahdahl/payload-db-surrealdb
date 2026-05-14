@@ -304,7 +304,15 @@ const setAtomicValueAtPath = (doc: Record<string, unknown>, path: string, value:
       return
     }
 
-    target = Array.isArray(target) ? target[Number(part)] : (target as Record<string, unknown>)[part]
+    if (Array.isArray(target)) {
+      target = target[Number(part)]
+    } else {
+      const objectTarget = target as Record<string, unknown>
+      if (!objectTarget[part] || typeof objectTarget[part] !== 'object') {
+        objectTarget[part] = {}
+      }
+      target = objectTarget[part]
+    }
   }
 }
 
@@ -390,6 +398,16 @@ const refreshNestedRowIDs = (value: Record<string, unknown>, fields: any[] = [])
   }
 
   return value
+}
+
+const removeDottedOperatorKeys = (data: Record<string, unknown>): Record<string, unknown> => {
+  for (const [key, value] of Object.entries(data)) {
+    if (key.includes('.') && value && typeof value === 'object') {
+      delete data[key]
+    }
+  }
+
+  return data
 }
 
 const applyAtomicUpdate = (data: Record<string, unknown>, existing: Record<string, unknown>): Record<string, unknown> => {
@@ -590,7 +608,9 @@ export const count: Count = async function count(this: SurrealAdapter, args) {
 export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapter, args) {
   const collectionConfig = getCollectionConfig(this, args.collection)
   const table = getTableName(args.collection, this.tablePrefix)
+  const dottedData = Object.fromEntries(Object.entries(args.data).filter(([key]) => key.includes('.')))
   let data = transformRelationshipWrites(applyDefaults({ ...args.data }, collectionConfig?.fields), collectionConfig?.fields)
+  Object.assign(data, dottedData)
   const shouldReturn = args.returning !== false
 
   delete data.id
@@ -611,10 +631,11 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
   if (args.id) {
     const existing = await this.client.query<Record<string, unknown>[]>(`SELECT * FROM ${getRecordID(table, args.id)};`)
     const existingDoc = normalizeDocument(existing[0]) ?? { id: args.id }
-    data = applyAtomicUpdate(data, existingDoc)
+    data = removeDottedOperatorKeys(applyAtomicUpdate(data, existingDoc))
     await validateUniqueIndexes(this, args.collection, { ...existingDoc, ...data }, args.id)
 
-    const statement = `UPDATE ${getRecordID(table, args.id)} MERGE ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
+    const updateContent = Object.keys(dottedData).length ? { ...existingDoc, ...data, id: args.id } : data
+    const statement = `UPDATE ${getRecordID(table, args.id)} ${Object.keys(dottedData).length ? 'CONTENT' : 'MERGE'} ${literal(updateContent)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
 
     if (await queueTransactionStatement(this, args.req, statement)) {
       return shouldReturn ? applySelect(normalizeDocument({ ...existingDoc, ...data, id: args.id }), args.select) : null
@@ -637,10 +658,11 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
     return null
   }
 
-  data = applyAtomicUpdate(data, found)
+  data = removeDottedOperatorKeys(applyAtomicUpdate(data, found))
   await validateUniqueIndexes(this, args.collection, { ...found, ...data }, found.id)
 
-  const statement = `UPDATE ${getRecordID(table, found.id)} MERGE ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
+  const updateContent = Object.keys(dottedData).length ? { ...found, ...data } : data
+  const statement = `UPDATE ${getRecordID(table, found.id)} ${Object.keys(dottedData).length ? 'CONTENT' : 'MERGE'} ${literal(updateContent)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
 
   if (await queueTransactionStatement(this, args.req, statement)) {
     return shouldReturn ? applySelect(normalizeDocument({ ...found, ...data }), args.select) : null

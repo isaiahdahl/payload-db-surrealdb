@@ -245,7 +245,16 @@ const setAtomicValueAtPath = (doc, path, value) => {
             }
             return;
         }
-        target = Array.isArray(target) ? target[Number(part)] : target[part];
+        if (Array.isArray(target)) {
+            target = target[Number(part)];
+        }
+        else {
+            const objectTarget = target;
+            if (!objectTarget[part] || typeof objectTarget[part] !== 'object') {
+                objectTarget[part] = {};
+            }
+            target = objectTarget[part];
+        }
     }
 };
 const validateUniqueIndexes = async (adapter, collection, data, id) => {
@@ -326,6 +335,14 @@ const refreshNestedRowIDs = (value, fields = []) => {
         }
     }
     return value;
+};
+const removeDottedOperatorKeys = (data) => {
+    for (const [key, value] of Object.entries(data)) {
+        if (key.includes('.') && value && typeof value === 'object') {
+            delete data[key];
+        }
+    }
+    return data;
 };
 const applyAtomicUpdate = (data, existing) => {
     const next = structuredClone(data);
@@ -494,7 +511,9 @@ export const count = async function count(args) {
 export const updateOne = async function updateOne(args) {
     const collectionConfig = getCollectionConfig(this, args.collection);
     const table = getTableName(args.collection, this.tablePrefix);
+    const dottedData = Object.fromEntries(Object.entries(args.data).filter(([key]) => key.includes('.')));
     let data = transformRelationshipWrites(applyDefaults({ ...args.data }, collectionConfig?.fields), collectionConfig?.fields);
+    Object.assign(data, dottedData);
     const shouldReturn = args.returning !== false;
     delete data.id;
     if (hasTimestamps(this, args.collection)) {
@@ -513,9 +532,10 @@ export const updateOne = async function updateOne(args) {
     if (args.id) {
         const existing = await this.client.query(`SELECT * FROM ${getRecordID(table, args.id)};`);
         const existingDoc = normalizeDocument(existing[0]) ?? { id: args.id };
-        data = applyAtomicUpdate(data, existingDoc);
+        data = removeDottedOperatorKeys(applyAtomicUpdate(data, existingDoc));
         await validateUniqueIndexes(this, args.collection, { ...existingDoc, ...data }, args.id);
-        const statement = `UPDATE ${getRecordID(table, args.id)} MERGE ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
+        const updateContent = Object.keys(dottedData).length ? { ...existingDoc, ...data, id: args.id } : data;
+        const statement = `UPDATE ${getRecordID(table, args.id)} ${Object.keys(dottedData).length ? 'CONTENT' : 'MERGE'} ${literal(updateContent)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
         if (await queueTransactionStatement(this, args.req, statement)) {
             return shouldReturn ? applySelect(normalizeDocument({ ...existingDoc, ...data, id: args.id }), args.select) : null;
         }
@@ -533,9 +553,10 @@ export const updateOne = async function updateOne(args) {
     if (!found) {
         return null;
     }
-    data = applyAtomicUpdate(data, found);
+    data = removeDottedOperatorKeys(applyAtomicUpdate(data, found));
     await validateUniqueIndexes(this, args.collection, { ...found, ...data }, found.id);
-    const statement = `UPDATE ${getRecordID(table, found.id)} MERGE ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
+    const updateContent = Object.keys(dottedData).length ? { ...found, ...data } : data;
+    const statement = `UPDATE ${getRecordID(table, found.id)} ${Object.keys(dottedData).length ? 'CONTENT' : 'MERGE'} ${literal(updateContent)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
     if (await queueTransactionStatement(this, args.req, statement)) {
         return shouldReturn ? applySelect(normalizeDocument({ ...found, ...data }), args.select) : null;
     }
