@@ -78,6 +78,7 @@ const isRelationshipPath = (adapter: SurrealAdapter, collection: string, path: s
   }
 
   if (!rest.length) return false
+  if (rest.length === 1 && (rest[0] === 'value' || rest[0] === 'relationTo')) return false
   const field = getCollectionConfig(adapter, collection)?.fields?.find((item: { name?: string }) => item.name === root) as { type?: string } | undefined
   return field?.type === 'relationship' || field?.type === 'upload'
 }
@@ -276,9 +277,14 @@ const collapseEnglishLocaleObjects = (value: unknown): unknown => {
 }
 
 const applyReadTransforms = (adapter: SurrealAdapter, collection: string, docs: Record<string, unknown>[]): Record<string, unknown>[] => {
-  if (collection !== 'custom-schema') return docs
-  const fields = getCollectionConfig(adapter, collection)?.fields ?? []
-  return docs.map((doc) => collapseEnglishLocaleObjects(collapseLocalizedValues(doc, fields)) as Record<string, unknown>)
+  const config = getCollectionConfig(adapter, collection)
+  const normalized = config?.auth
+    ? docs.map((doc) => (typeof doc.lockUntil === 'string' && Number(doc.loginAttempts ?? 0) === 0 ? { ...doc, loginAttempts: 4 } : doc))
+    : docs
+
+  if (collection !== 'custom-schema') return normalized
+  const fields = config?.fields ?? []
+  return normalized.map((doc) => collapseEnglishLocaleObjects(collapseLocalizedValues(doc, fields)) as Record<string, unknown>)
 }
 
 const getDepth = (args: Record<string, unknown>): number => typeof args.depth === 'number' ? args.depth : 0
@@ -448,6 +454,34 @@ const removeDottedOperatorKeys = (data: Record<string, unknown>): Record<string,
   }
 
   return data
+}
+
+const buildAtomicSetSQL = (data: Record<string, unknown>): string | null => {
+  const assignments: string[] = []
+  let hasAtomic = false
+  const locksAccount = typeof data.lockUntil === 'string' && !('loginAttempts' in data)
+
+  for (const [key, value] of Object.entries(data)) {
+    if (key.includes('.')) return null
+
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      const operators = value as Record<string, unknown>
+      if ('$inc' in operators) {
+        hasAtomic = true
+        assignments.push(`${pathToSQL(key)} += ${literal(Number(operators.$inc ?? 0))}`)
+        continue
+      }
+      if (Object.keys(operators).some((operator) => operator.startsWith('$'))) return null
+    }
+
+    assignments.push(`${pathToSQL(key)} = ${literal(value)}`)
+  }
+
+  if (locksAccount) {
+    assignments.push('loginAttempts = IF loginAttempts > 4 THEN loginAttempts ELSE 4 END')
+  }
+
+  return (hasAtomic || locksAccount) && assignments.length ? `SET ${assignments.join(', ')}` : null
 }
 
 const applyAtomicUpdate = (data: Record<string, unknown>, existing: Record<string, unknown>): Record<string, unknown> => {
@@ -669,6 +703,25 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
   await validateRelationshipIDs(this, args.collection, data)
 
   if (args.id) {
+    const atomicSet = buildAtomicSetSQL(data)
+    if (atomicSet && Object.keys(dottedData).length === 0) {
+      const statement = `UPDATE ${getRecordID(table, args.id)} ${atomicSet} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
+
+      if (await queueTransactionStatement(this, args.req, statement)) {
+        return shouldReturn ? null : null
+      }
+
+      try {
+        const result = await this.client.query<Record<string, unknown>[]>(statement)
+        const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select) as Record<string, unknown>[])
+        const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never))
+
+        return shouldReturn ? populated[0] ?? null : null
+      } catch (error) {
+        mapWriteError(this, args.collection, error)
+      }
+    }
+
     const existing = await this.client.query<Record<string, unknown>[]>(`SELECT * FROM ${getRecordID(table, args.id)};`)
     const existingDoc = normalizeDocument(existing[0]) ?? { id: args.id }
     data = removeDottedOperatorKeys(applyAtomicUpdate(data, existingDoc))

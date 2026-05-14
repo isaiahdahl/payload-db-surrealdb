@@ -325,7 +325,7 @@ export const transformRelationshipWhere = (collectionConfig, where) => {
         }
         const rootField = key.split('.')[0];
         const field = fieldByName.get(rootField);
-        if (!field || !isRelationshipField(field) || !isPlainObject(value)) {
+        if (key !== rootField || !field || !isRelationshipField(field) || !isPlainObject(value)) {
             return [key, value];
         }
         return [

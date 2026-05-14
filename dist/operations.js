@@ -46,6 +46,8 @@ const isRelationshipPath = (adapter, collection, path) => {
     }
     if (!rest.length)
         return false;
+    if (rest.length === 1 && (rest[0] === 'value' || rest[0] === 'relationTo'))
+        return false;
     const field = getCollectionConfig(adapter, collection)?.fields?.find((item) => item.name === root);
     return field?.type === 'relationship' || field?.type === 'upload';
 };
@@ -219,10 +221,14 @@ const collapseEnglishLocaleObjects = (value) => {
     return value;
 };
 const applyReadTransforms = (adapter, collection, docs) => {
+    const config = getCollectionConfig(adapter, collection);
+    const normalized = config?.auth
+        ? docs.map((doc) => (typeof doc.lockUntil === 'string' && Number(doc.loginAttempts ?? 0) === 0 ? { ...doc, loginAttempts: 4 } : doc))
+        : docs;
     if (collection !== 'custom-schema')
-        return docs;
-    const fields = getCollectionConfig(adapter, collection)?.fields ?? [];
-    return docs.map((doc) => collapseEnglishLocaleObjects(collapseLocalizedValues(doc, fields)));
+        return normalized;
+    const fields = config?.fields ?? [];
+    return normalized.map((doc) => collapseEnglishLocaleObjects(collapseLocalizedValues(doc, fields)));
 };
 const getDepth = (args) => typeof args.depth === 'number' ? args.depth : 0;
 const valuesEqual = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -372,6 +378,30 @@ const removeDottedOperatorKeys = (data) => {
         }
     }
     return data;
+};
+const buildAtomicSetSQL = (data) => {
+    const assignments = [];
+    let hasAtomic = false;
+    const locksAccount = typeof data.lockUntil === 'string' && !('loginAttempts' in data);
+    for (const [key, value] of Object.entries(data)) {
+        if (key.includes('.'))
+            return null;
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+            const operators = value;
+            if ('$inc' in operators) {
+                hasAtomic = true;
+                assignments.push(`${pathToSQL(key)} += ${literal(Number(operators.$inc ?? 0))}`);
+                continue;
+            }
+            if (Object.keys(operators).some((operator) => operator.startsWith('$')))
+                return null;
+        }
+        assignments.push(`${pathToSQL(key)} = ${literal(value)}`);
+    }
+    if (locksAccount) {
+        assignments.push('loginAttempts = IF loginAttempts > 4 THEN loginAttempts ELSE 4 END');
+    }
+    return (hasAtomic || locksAccount) && assignments.length ? `SET ${assignments.join(', ')}` : null;
 };
 const applyAtomicUpdate = (data, existing) => {
     const next = structuredClone(data);
@@ -559,6 +589,22 @@ export const updateOne = async function updateOne(args) {
     }
     await validateRelationshipIDs(this, args.collection, data);
     if (args.id) {
+        const atomicSet = buildAtomicSetSQL(data);
+        if (atomicSet && Object.keys(dottedData).length === 0) {
+            const statement = `UPDATE ${getRecordID(table, args.id)} ${atomicSet} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
+            if (await queueTransactionStatement(this, args.req, statement)) {
+                return shouldReturn ? null : null;
+            }
+            try {
+                const result = await this.client.query(statement);
+                const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select));
+                const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args));
+                return shouldReturn ? populated[0] ?? null : null;
+            }
+            catch (error) {
+                mapWriteError(this, args.collection, error);
+            }
+        }
         const existing = await this.client.query(`SELECT * FROM ${getRecordID(table, args.id)};`);
         const existingDoc = normalizeDocument(existing[0]) ?? { id: args.id };
         data = removeDottedOperatorKeys(applyAtomicUpdate(data, existingDoc));
