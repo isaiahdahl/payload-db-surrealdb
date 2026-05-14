@@ -123,14 +123,26 @@ const isMissingTableError = (error) => {
     return error instanceof Error && /table .* does not exist/i.test(error.message);
 };
 const normalizeDocs = (docs, select) => docs.map((doc) => applySelect(normalizeDocument(doc), select)).filter(Boolean);
+const getFieldStorageName = (field) => {
+    if (!field?.name)
+        return undefined;
+    return typeof field.dbName === 'function' ? field.dbName({ tableName: '' }) : (field.dbName ?? field.name);
+};
 const collapseLocalizedValues = (value, fields = []) => {
     for (const field of fields) {
-        if (field.name && field.localized && value[field.name] && typeof value[field.name] === 'object' && !Array.isArray(value[field.name])) {
+        const storageName = getFieldStorageName(field);
+        if (!field.name || !storageName)
+            continue;
+        if (storageName !== field.name && value[field.name] === undefined && value[storageName] !== undefined) {
+            value[field.name] = value[storageName];
+            delete value[storageName];
+        }
+        if (field.localized && value[field.name] && typeof value[field.name] === 'object' && !Array.isArray(value[field.name])) {
             const localized = value[field.name];
             if ('en' in localized)
                 value[field.name] = localized.en;
         }
-        if (field.name && Array.isArray(value[field.name])) {
+        if (Array.isArray(value[field.name])) {
             value[field.name] = value[field.name].map((row) => {
                 if (!row || typeof row !== 'object' || Array.isArray(row))
                     return row;
@@ -139,7 +151,7 @@ const collapseLocalizedValues = (value, fields = []) => {
                 return collapseLocalizedValues(nested, block?.fields ?? field.fields ?? []);
             });
         }
-        else if (field.name && value[field.name] && typeof value[field.name] === 'object' && !Array.isArray(value[field.name])) {
+        else if (value[field.name] && typeof value[field.name] === 'object' && !Array.isArray(value[field.name])) {
             value[field.name] = collapseLocalizedValues(value[field.name], field.fields ?? []);
         }
     }
@@ -217,6 +229,35 @@ const validateRelationshipIDs = async (adapter, collection, data) => {
         }
     }
 };
+const refreshNestedRowIDs = (value, fields = []) => {
+    for (const field of fields) {
+        if (!field.name)
+            continue;
+        const current = value[field.name];
+        if (field.localized && current && typeof current === 'object' && !Array.isArray(current)) {
+            for (const [locale, localeValue] of Object.entries(current)) {
+                const localeWrapper = { [field.name]: localeValue };
+                refreshNestedRowIDs(localeWrapper, [{ ...field, localized: false }]);
+                current[locale] = localeWrapper[field.name];
+            }
+        }
+        else if ((field.type === 'array' || field.type === 'blocks') && Array.isArray(current)) {
+            value[field.name] = current.map((row) => {
+                if (!row || typeof row !== 'object' || Array.isArray(row))
+                    return row;
+                const nested = { ...row };
+                if (nested.id !== undefined)
+                    nested.id = randomID();
+                const block = field.type === 'blocks' ? (field.blocks ?? []).find((candidate) => candidate.slug === nested.blockType) : undefined;
+                return refreshNestedRowIDs(nested, block?.fields ?? field.fields ?? []);
+            });
+        }
+        else if (current && typeof current === 'object' && !Array.isArray(current)) {
+            refreshNestedRowIDs(current, field.fields ?? []);
+        }
+    }
+    return value;
+};
 const applyAtomicUpdate = (data, existing) => {
     const next = structuredClone(data);
     const visit = (obj, prefix = '') => {
@@ -251,7 +292,11 @@ export const create = async function create(args) {
     const table = getTableName(args.collection, this.tablePrefix);
     const id = args.customID ?? args.data.id;
     const resolvedID = id ?? randomID();
+    const isDuplicatedCreate = args.data.updatedAt !== undefined || args.data.createdAt !== undefined;
     let data = transformRelationshipWrites(applyDefaults({ ...args.data }, collectionConfig?.fields), collectionConfig?.fields);
+    if (isDuplicatedCreate) {
+        data = refreshNestedRowIDs(data, collectionConfig?.fields);
+    }
     const shouldReturn = args.returning !== false;
     if (resolvedID) {
         delete data.id;
@@ -403,7 +448,7 @@ export const updateOne = async function updateOne(args) {
         }
         try {
             const result = await this.client.query(statement);
-            const docs = normalizeDocs(result, args.select);
+            const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select));
             const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args));
             return shouldReturn ? populated[0] ?? null : null;
         }

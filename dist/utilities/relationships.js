@@ -33,28 +33,54 @@ const normalizeRelationshipValue = (field, value) => {
     if (value === null || value === undefined) {
         return value;
     }
+    if (isPlainObject(value) && Object.keys(value).some((key) => key.startsWith('$'))) {
+        return Object.fromEntries(Object.entries(value).map(([operator, operatorValue]) => [
+            operator,
+            operator === '$push' || operator === '$remove'
+                ? normalizeRelationshipValue(field, operatorValue)
+                : operatorValue,
+        ]));
+    }
     if (isPolymorphic(field)) {
         return field.hasMany && Array.isArray(value) ? value.map(normalizePolymorphicRef) : normalizePolymorphicRef(value);
     }
     return field.hasMany && Array.isArray(value) ? value.map(getRefID) : getRefID(value);
 };
+const getNestedFields = (field, value) => {
+    if (field.type === 'blocks' && isPlainObject(value)) {
+        const block = (field.blocks ?? []).find((candidate) => candidate.slug === value.blockType);
+        return block?.fields ?? [];
+    }
+    return field.fields ?? [];
+};
+const transformRelationshipValueWrites = (value, field) => {
+    if (value === null || value === undefined) {
+        return value;
+    }
+    if (field.localized && isPlainObject(value) && !Object.keys(value).some((key) => key.startsWith('$'))) {
+        return Object.fromEntries(Object.entries(value).map(([locale, localeValue]) => [
+            locale,
+            transformRelationshipValueWrites(localeValue, { ...field, localized: false }),
+        ]));
+    }
+    if (isRelationshipField(field)) {
+        return normalizeRelationshipValue(field, value);
+    }
+    if ((field.type === 'array' || field.type === 'blocks') && Array.isArray(value)) {
+        return value.map((row) => isPlainObject(row) ? transformRelationshipWrites(row, getNestedFields(field, row)) : row);
+    }
+    const nestedFields = getNestedFields(field, value);
+    if (nestedFields.length && isPlainObject(value)) {
+        return transformRelationshipWrites(value, nestedFields);
+    }
+    return value;
+};
 export const transformRelationshipWrites = (data, fields = []) => {
     for (const field of fields) {
-        if (!field.name) {
+        if (!field.name || !(field.name in data)) {
             continue;
         }
-        if (isRelationshipField(field) && field.name in data) {
-            data[field.name] = normalizeRelationshipValue(field, data[field.name]);
-            continue;
-        }
-        if (field.fields?.length && data[field.name] !== undefined && data[field.name] !== null) {
-            if (field.type === 'array' && Array.isArray(data[field.name])) {
-                data[field.name] = data[field.name].map((row) => isPlainObject(row) ? transformRelationshipWrites(row, field.fields ?? []) : row);
-            }
-            else if (isPlainObject(data[field.name])) {
-                data[field.name] = transformRelationshipWrites(data[field.name], field.fields);
-            }
-        }
+        data[field.name] = transformRelationshipValueWrites(data[field.name], field);
     }
     return data;
 };

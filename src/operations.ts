@@ -160,21 +160,34 @@ const isMissingTableError = (error: unknown): boolean => {
 const normalizeDocs = (docs: Array<Record<string, unknown>>, select?: Record<string, unknown>) =>
   docs.map((doc) => applySelect(normalizeDocument(doc), select)).filter(Boolean)
 
+const getFieldStorageName = (field: any): string | undefined => {
+  if (!field?.name) return undefined
+  return typeof field.dbName === 'function' ? field.dbName({ tableName: '' }) : (field.dbName ?? field.name)
+}
+
 const collapseLocalizedValues = (value: Record<string, unknown>, fields: any[] = []): Record<string, unknown> => {
   for (const field of fields) {
-    if (field.name && field.localized && value[field.name] && typeof value[field.name] === 'object' && !Array.isArray(value[field.name])) {
+    const storageName = getFieldStorageName(field)
+    if (!field.name || !storageName) continue
+
+    if (storageName !== field.name && value[field.name] === undefined && value[storageName] !== undefined) {
+      value[field.name] = value[storageName]
+      delete value[storageName]
+    }
+
+    if (field.localized && value[field.name] && typeof value[field.name] === 'object' && !Array.isArray(value[field.name])) {
       const localized = value[field.name] as Record<string, unknown>
       if ('en' in localized) value[field.name] = localized.en
     }
 
-    if (field.name && Array.isArray(value[field.name])) {
+    if (Array.isArray(value[field.name])) {
       value[field.name] = (value[field.name] as unknown[]).map((row) => {
         if (!row || typeof row !== 'object' || Array.isArray(row)) return row
         const nested = row as Record<string, unknown>
         const block = field.type === 'blocks' ? (field.blocks ?? []).find((candidate: any) => candidate.slug === nested.blockType) : undefined
         return collapseLocalizedValues(nested, block?.fields ?? field.fields ?? [])
       })
-    } else if (field.name && value[field.name] && typeof value[field.name] === 'object' && !Array.isArray(value[field.name])) {
+    } else if (value[field.name] && typeof value[field.name] === 'object' && !Array.isArray(value[field.name])) {
       value[field.name] = collapseLocalizedValues(value[field.name] as Record<string, unknown>, field.fields ?? [])
     }
   }
@@ -266,6 +279,34 @@ const validateRelationshipIDs = async (adapter: SurrealAdapter, collection: stri
   }
 }
 
+const refreshNestedRowIDs = (value: Record<string, unknown>, fields: any[] = []): Record<string, unknown> => {
+  for (const field of fields) {
+    if (!field.name) continue
+    const current = value[field.name]
+
+    if (field.localized && current && typeof current === 'object' && !Array.isArray(current)) {
+      for (const [locale, localeValue] of Object.entries(current as Record<string, unknown>)) {
+        const localeWrapper = { [field.name]: localeValue }
+        refreshNestedRowIDs(localeWrapper, [{ ...field, localized: false }])
+        ;(current as Record<string, unknown>)[locale] = localeWrapper[field.name]
+      }
+    } else if ((field.type === 'array' || field.type === 'blocks') && Array.isArray(current)) {
+      value[field.name] = current.map((row) => {
+        if (!row || typeof row !== 'object' || Array.isArray(row)) return row
+        const nested: Record<string, unknown> = { ...(row as Record<string, unknown>) }
+        if (nested.id !== undefined) nested.id = randomID()
+        const block = field.type === 'blocks' ? (field.blocks ?? []).find((candidate: any) => candidate.slug === nested.blockType) : undefined
+
+        return refreshNestedRowIDs(nested, block?.fields ?? field.fields ?? [])
+      })
+    } else if (current && typeof current === 'object' && !Array.isArray(current)) {
+      refreshNestedRowIDs(current as Record<string, unknown>, field.fields ?? [])
+    }
+  }
+
+  return value
+}
+
 const applyAtomicUpdate = (data: Record<string, unknown>, existing: Record<string, unknown>): Record<string, unknown> => {
   const next = structuredClone(data)
 
@@ -306,7 +347,11 @@ export const create: Create = async function create(this: SurrealAdapter, args) 
   const table = getTableName(args.collection, this.tablePrefix)
   const id = args.customID ?? args.data.id
   const resolvedID = id ?? randomID()
+  const isDuplicatedCreate = args.data.updatedAt !== undefined || args.data.createdAt !== undefined
   let data = transformRelationshipWrites(applyDefaults({ ...args.data }, collectionConfig?.fields), collectionConfig?.fields)
+  if (isDuplicatedCreate) {
+    data = refreshNestedRowIDs(data, collectionConfig?.fields)
+  }
   const shouldReturn = args.returning !== false
 
   if (resolvedID) {
@@ -487,7 +532,7 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
 
     try {
       const result = await this.client.query<Record<string, unknown>[]>(statement)
-      const docs = normalizeDocs(result, args.select) as Record<string, unknown>[]
+      const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select) as Record<string, unknown>[])
       const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never))
 
       return shouldReturn ? populated[0] ?? null : null

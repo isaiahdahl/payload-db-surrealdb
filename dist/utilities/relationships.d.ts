@@ -1,10 +1,15 @@
 import type { SurrealAdapter } from '../index.js';
 type Field = {
+    blocks?: Array<{
+        fields?: Field[];
+        slug?: string;
+    }>;
     collection?: string;
     defaultLimit?: number;
     fields?: Field[];
     hasMany?: boolean;
     limit?: number;
+    localized?: boolean;
     name?: string;
     on?: string;
     relationTo?: string | string[];

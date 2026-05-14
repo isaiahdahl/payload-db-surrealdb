@@ -5,11 +5,16 @@ import { getCollectionConfig } from './fields.js'
 import { escapeIdent, literal, normalizeDocument } from './sql.js'
 
 type Field = {
+  blocks?: Array<{
+    fields?: Field[]
+    slug?: string
+  }>
   collection?: string
   defaultLimit?: number
   fields?: Field[]
   hasMany?: boolean
   limit?: number
+  localized?: boolean
   name?: string
   on?: string
   relationTo?: string | string[]
@@ -64,6 +69,17 @@ const normalizeRelationshipValue = (field: Field, value: unknown): unknown => {
     return value
   }
 
+  if (isPlainObject(value) && Object.keys(value).some((key) => key.startsWith('$'))) {
+    return Object.fromEntries(
+      Object.entries(value).map(([operator, operatorValue]) => [
+        operator,
+        operator === '$push' || operator === '$remove'
+          ? normalizeRelationshipValue(field, operatorValue)
+          : operatorValue,
+      ]),
+    )
+  }
+
   if (isPolymorphic(field)) {
     return field.hasMany && Array.isArray(value) ? value.map(normalizePolymorphicRef) : normalizePolymorphicRef(value)
   }
@@ -71,26 +87,54 @@ const normalizeRelationshipValue = (field: Field, value: unknown): unknown => {
   return field.hasMany && Array.isArray(value) ? value.map(getRefID) : getRefID(value)
 }
 
+const getNestedFields = (field: Field, value?: unknown): Field[] => {
+  if (field.type === 'blocks' && isPlainObject(value)) {
+    const block = (field.blocks ?? []).find((candidate) => candidate.slug === value.blockType)
+
+    return block?.fields ?? []
+  }
+
+  return field.fields ?? []
+}
+
+const transformRelationshipValueWrites = (value: unknown, field: Field): unknown => {
+  if (value === null || value === undefined) {
+    return value
+  }
+
+  if (field.localized && isPlainObject(value) && !Object.keys(value).some((key) => key.startsWith('$'))) {
+    return Object.fromEntries(
+      Object.entries(value).map(([locale, localeValue]) => [
+        locale,
+        transformRelationshipValueWrites(localeValue, { ...field, localized: false }),
+      ]),
+    )
+  }
+
+  if (isRelationshipField(field)) {
+    return normalizeRelationshipValue(field, value)
+  }
+
+  if ((field.type === 'array' || field.type === 'blocks') && Array.isArray(value)) {
+    return value.map((row) => isPlainObject(row) ? transformRelationshipWrites(row, getNestedFields(field, row)) : row)
+  }
+
+  const nestedFields = getNestedFields(field, value)
+
+  if (nestedFields.length && isPlainObject(value)) {
+    return transformRelationshipWrites(value, nestedFields)
+  }
+
+  return value
+}
+
 export const transformRelationshipWrites = (data: Record<string, unknown>, fields: Field[] = []): Record<string, unknown> => {
   for (const field of fields) {
-    if (!field.name) {
+    if (!field.name || !(field.name in data)) {
       continue
     }
 
-    if (isRelationshipField(field) && field.name in data) {
-      data[field.name] = normalizeRelationshipValue(field, data[field.name])
-      continue
-    }
-
-    if (field.fields?.length && data[field.name] !== undefined && data[field.name] !== null) {
-      if (field.type === 'array' && Array.isArray(data[field.name])) {
-        data[field.name] = (data[field.name] as Record<string, unknown>[]).map((row) =>
-          isPlainObject(row) ? transformRelationshipWrites(row, field.fields ?? []) : row,
-        )
-      } else if (isPlainObject(data[field.name])) {
-        data[field.name] = transformRelationshipWrites(data[field.name] as Record<string, unknown>, field.fields)
-      }
-    }
+    data[field.name] = transformRelationshipValueWrites(data[field.name], field)
   }
 
   return data
