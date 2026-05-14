@@ -1,7 +1,7 @@
 import { SurrealDBError } from './client.js';
 import { pathToSQL } from './queries/buildWhere.js';
 import { queueTransactionStatement } from './transactions/index.js';
-import { applyDefaults, applySelect, getCollectionConfig, hasTimestamps } from './utilities/fields.js';
+import { applyDefaults, applySelect, getCollectionConfig, getValueAtPath, hasTimestamps, setValueAtPath } from './utilities/fields.js';
 import { buildRelationshipAwareWhere, transformRelationshipReads, transformRelationshipWrites } from './utilities/relationships.js';
 import { escapeIdent, getRecordID, getTableName, literal, normalizeDocument } from './utilities/sql.js';
 const randomID = () => {
@@ -41,12 +41,56 @@ const isMissingTableError = (error) => {
 };
 const normalizeDocs = (docs, select) => docs.map((doc) => applySelect(normalizeDocument(doc), select)).filter(Boolean);
 const getDepth = (args) => typeof args.depth === 'number' ? args.depth : 0;
+const valuesEqual = (a, b) => JSON.stringify(a) === JSON.stringify(b);
+const appendUnique = (target, value) => {
+    const values = Array.isArray(value) ? value : [value];
+    const next = [...target];
+    for (const item of values) {
+        if (!next.some((existing) => valuesEqual(existing, item))) {
+            next.push(item);
+        }
+    }
+    return next;
+};
+const removeValues = (target, value) => {
+    const values = Array.isArray(value) ? value : [value];
+    return target.filter((item) => !values.some((remove) => valuesEqual(remove, item)));
+};
+const applyAtomicUpdate = (data, existing) => {
+    const next = structuredClone(data);
+    const visit = (obj, prefix = '') => {
+        for (const [key, value] of Object.entries(obj)) {
+            const path = prefix ? `${prefix}.${key}` : key;
+            if (!value || typeof value !== 'object' || Array.isArray(value)) {
+                continue;
+            }
+            const operators = value;
+            const hasOperator = Object.keys(operators).some((operator) => operator.startsWith('$'));
+            if (!hasOperator) {
+                visit(operators, path);
+                continue;
+            }
+            const current = getValueAtPath(existing, path);
+            if ('$inc' in operators) {
+                setValueAtPath(next, path, Number(current ?? 0) + Number(operators.$inc ?? 0));
+            }
+            else if ('$push' in operators) {
+                setValueAtPath(next, path, appendUnique(Array.isArray(current) ? current : [], operators.$push));
+            }
+            else if ('$remove' in operators) {
+                setValueAtPath(next, path, removeValues(Array.isArray(current) ? current : [], operators.$remove));
+            }
+        }
+    };
+    visit(next);
+    return next;
+};
 export const create = async function create(args) {
     const collectionConfig = getCollectionConfig(this, args.collection);
     const table = getTableName(args.collection, this.tablePrefix);
     const id = args.customID ?? args.data.id;
     const resolvedID = id ?? randomID();
-    const data = transformRelationshipWrites(applyDefaults({ ...args.data }, collectionConfig?.fields), collectionConfig?.fields);
+    let data = transformRelationshipWrites(applyDefaults({ ...args.data }, collectionConfig?.fields), collectionConfig?.fields);
     const shouldReturn = args.returning !== false;
     if (resolvedID) {
         delete data.id;
@@ -67,6 +111,8 @@ export const create = async function create(args) {
     try {
         const result = await this.client.query(statement);
         const docs = normalizeDocs(result, args.select);
+        if (docs[0] && id !== undefined)
+            docs[0].id = resolvedID;
         const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args));
         return shouldReturn ? populated[0] ?? null : null;
     }
@@ -137,7 +183,7 @@ export const count = async function count(args) {
 export const updateOne = async function updateOne(args) {
     const collectionConfig = getCollectionConfig(this, args.collection);
     const table = getTableName(args.collection, this.tablePrefix);
-    const data = transformRelationshipWrites(applyDefaults({ ...args.data }, collectionConfig?.fields), collectionConfig?.fields);
+    let data = transformRelationshipWrites(applyDefaults({ ...args.data }, collectionConfig?.fields), collectionConfig?.fields);
     const shouldReturn = args.returning !== false;
     delete data.id;
     if (hasTimestamps(this, args.collection)) {
@@ -153,10 +199,11 @@ export const updateOne = async function updateOne(args) {
         delete data.updatedAt;
     }
     if (args.id) {
+        const existing = await this.client.query(`SELECT * FROM ${getRecordID(table, args.id)};`);
+        const existingDoc = normalizeDocument(existing[0]) ?? { id: args.id };
+        data = applyAtomicUpdate(data, existingDoc);
         const statement = `UPDATE ${getRecordID(table, args.id)} MERGE ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
         if (await queueTransactionStatement(this, args.req, statement)) {
-            const existing = await this.client.query(`SELECT * FROM ${getRecordID(table, args.id)};`);
-            const existingDoc = normalizeDocument(existing[0]) ?? { id: args.id };
             return shouldReturn ? applySelect(normalizeDocument({ ...existingDoc, ...data, id: args.id }), args.select) : null;
         }
         try {
@@ -173,6 +220,7 @@ export const updateOne = async function updateOne(args) {
     if (!found) {
         return null;
     }
+    data = applyAtomicUpdate(data, found);
     const statement = `UPDATE ${getRecordID(table, found.id)} MERGE ${literal(data)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
     if (await queueTransactionStatement(this, args.req, statement)) {
         return shouldReturn ? applySelect(normalizeDocument({ ...found, ...data }), args.select) : null;
