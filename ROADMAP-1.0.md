@@ -4,13 +4,15 @@ This document defines the plan to move `payload-db-surrealdb` from alpha proof-o
 
 ## Current state
 
-The adapter currently proves that Payload can boot against SurrealDB and perform basic CRUD through a minimal demo. The demo runs with:
+The adapter now passes Payload's core database, auth, globals, REST collections, and GraphQL collections integration suites against SurrealDB. Uploads are at 100/102 passing in this environment; the two remaining failures are paste-url localhost status expectations affected by a local nginx service returning 404 on `127.0.0.1:80`, not a database adapter behavior.
+
+The demo runs with:
 
 - Payload admin: http://localhost:3010/admin
 - Surrealist: http://localhost:8080
 - SurrealDB API: http://localhost:8000
 
-The adapter is not yet production-ready. Known major gaps include transactions, relationship population, joins, localization, full versions/drafts semantics, unique indexes, robust migrations, and full Payload test-suite parity.
+The adapter is not yet production-ready. Remaining hardening includes broader field/relationship/joins/uploads/version/localization/admin suites, durable transaction semantics, concurrency validation, and full Payload test-suite parity.
 
 ## 1.0 principle
 
@@ -18,7 +20,7 @@ A 1.0 release must mean the adapter can run normal Payload applications, not jus
 
 ## Release gates
 
-### Gate 1: Basic adapter contract
+### Gate 1: Basic adapter contract ✅
 
 Required suites:
 
@@ -64,7 +66,7 @@ Must support:
 - stable multi-field sorting
 - true `findDistinct`
 
-### Gate 3: Relationships, uploads, and joins
+### Gate 3: Relationships, uploads, and joins 🚧
 
 Required suites:
 
@@ -74,6 +76,8 @@ PAYLOAD_DATABASE=surrealdb pnpm test:int test/joins/int.spec.ts
 PAYLOAD_DATABASE=surrealdb pnpm test:int test/uploads/int.spec.ts
 PAYLOAD_DATABASE=surrealdb pnpm test:int test/dataloader/int.spec.ts
 ```
+
+Current uploads status: 100/102 passing after adapter fixes for upload cookie-fetch isolation and localized upload relationships in blocks. The two remaining local failures are environment-sensitive paste-url checks caused by nginx responding on `127.0.0.1:80` / `localhost:80` with 404 where the suite expects a failed/blocked fetch status of 500.
 
 Must support:
 
