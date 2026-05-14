@@ -2,6 +2,7 @@ import type { CreateGlobal, FindGlobal, UpdateGlobal } from 'payload'
 
 import type { SurrealAdapter } from './index.js'
 
+import { buildWhere } from './queries/buildWhere.js'
 import { queueTransactionStatement } from './transactions/index.js'
 import { getRecordID, getTableName, literal, normalizeDocument } from './utilities/sql.js'
 
@@ -23,7 +24,8 @@ export const createGlobal: CreateGlobal = async function createGlobal(this: Surr
 }
 
 export const findGlobal: FindGlobal = async function findGlobal(this: SurrealAdapter, args) {
-  const result = await this.client.query<Record<string, unknown>[]>(`SELECT * FROM ${getRecordID(getGlobalsTable(this), args.slug)};`)
+  const where = buildWhere(args.where as never)
+  const result = await this.client.query<Record<string, unknown>[]>(`SELECT * FROM ${getRecordID(getGlobalsTable(this), args.slug)} ${where};`)
 
   return (normalizeDocument(result[0]) ?? {}) as never
 }

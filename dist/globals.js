@@ -1,3 +1,4 @@
+import { buildWhere } from './queries/buildWhere.js';
 import { queueTransactionStatement } from './transactions/index.js';
 import { getRecordID, getTableName, literal, normalizeDocument } from './utilities/sql.js';
 const getGlobalsTable = (adapter) => getTableName('payload_globals', adapter.tablePrefix);
@@ -13,7 +14,8 @@ export const createGlobal = async function createGlobal(args) {
     return (normalizeDocument(result[0]) ?? args.data);
 };
 export const findGlobal = async function findGlobal(args) {
-    const result = await this.client.query(`SELECT * FROM ${getRecordID(getGlobalsTable(this), args.slug)};`);
+    const where = buildWhere(args.where);
+    const result = await this.client.query(`SELECT * FROM ${getRecordID(getGlobalsTable(this), args.slug)} ${where};`);
     return (normalizeDocument(result[0]) ?? {});
 };
 export const updateGlobal = async function updateGlobal(args) {
