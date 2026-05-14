@@ -9,7 +9,9 @@
     "start": "cross-env NODE_OPTIONS=--no-deprecation next start",
     "payload": "cross-env NODE_OPTIONS=--no-deprecation payload",
     "generate:importmap": "cross-env NODE_OPTIONS=--no-deprecation payload generate:importmap",
-    "generate:types": "cross-env NODE_OPTIONS=--no-deprecation payload generate:types"
+    "generate:types": "cross-env NODE_OPTIONS=--no-deprecation payload generate:types",
+    "test:e2e": "cross-env NODE_OPTIONS=--no-deprecation playwright test --config=playwright.config.ts",
+    "smoke:demo": "npm run test:e2e --"
   },
   "dependencies": {
     "@payloadcms/next": "3.84.1",
@@ -25,6 +27,7 @@
     "sharp": "0.34.2"
   },
   "devDependencies": {
+    "@playwright/test": "1.59.1",
     "@types/node": "24.12.3",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",

@@ -32,12 +32,27 @@ Namespace: payload_demo
 Database:  payload_demo
 ```
 
+## Automated smoke
+
+```bash
+npm run smoke:demo -- --project=chromium
+```
+
+The smoke starts the app on `http://127.0.0.1:3010` by default, creates or logs in as the first admin user, opens Users and Posts in the admin UI, creates a Post through REST, checks `/api/posts`, and verifies the row with SurrealDB `/sql`.
+
+Install the browser once with:
+
+```bash
+npx playwright install --with-deps chromium
+```
+
 ## What this demonstrates
 
 - Payload can boot with `surrealAdapter()`
 - Payload can initialize schemaless SurrealDB tables
 - Admin can use a simple collection
 - REST API and frontend can read from SurrealDB through Payload
+- Browser/API/SurrealDB smoke coverage for the basic demo loop
 
 ## Known limitations
 

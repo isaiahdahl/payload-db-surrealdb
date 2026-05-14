@@ -62,6 +62,10 @@ const mapWriteError = (error: unknown): never => {
   throw error
 }
 
+const isMissingTableError = (error: unknown): boolean => {
+  return error instanceof Error && /table .* does not exist/i.test(error.message)
+}
+
 const normalizeDocs = (docs: Array<Record<string, unknown>>, select?: Record<string, unknown>) =>
   docs.map((doc) => applySelect(normalizeDocument(doc), select)).filter(Boolean)
 
@@ -108,11 +112,20 @@ export const create: Create = async function create(this: SurrealAdapter, args) 
 export const findOne: FindOne = (async function findOne(this: SurrealAdapter, args) {
   const table = escapeIdent(getTableName(args.collection, this.tablePrefix))
   const where = buildRelationshipAwareWhere(this, args.collection, args.where)
-  const result = await this.client.query<Record<string, unknown>[]>(`SELECT * FROM ${table} ${where} LIMIT 1;`)
-  const docs = normalizeDocs(result, args.select) as Record<string, unknown>[]
-  const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never))
 
-  return populated[0] ?? null
+  try {
+    const result = await this.client.query<Record<string, unknown>[]>(`SELECT * FROM ${table} ${where} LIMIT 1;`)
+    const docs = normalizeDocs(result, args.select) as Record<string, unknown>[]
+    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never))
+
+    return populated[0] ?? null
+  } catch (error) {
+    if (isMissingTableError(error)) {
+      return null
+    }
+
+    throw error
+  }
 }) as FindOne
 
 export const find: Find = async function find(this: SurrealAdapter, args) {
@@ -121,9 +134,18 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
   const where = buildRelationshipAwareWhere(this, args.collection, args.where)
   const sort = getSortSQL(args.sort)
   const limitSQL = limit > 0 ? `LIMIT ${limit} START ${start}` : ''
-  const docs = await this.client.query<Record<string, unknown>[]>(
-    `SELECT * FROM ${table} ${where} ${sort} ${limitSQL};`,
-  )
+  let docs: Record<string, unknown>[] = []
+
+  try {
+    docs = await this.client.query<Record<string, unknown>[]>(
+      `SELECT * FROM ${table} ${where} ${sort} ${limitSQL};`,
+    )
+  } catch (error) {
+    if (!isMissingTableError(error)) {
+      throw error
+    }
+  }
+
   const totalDocs = await count.call(this, { collection: args.collection, req: args.req, where: args.where })
   const totalPages = limit > 0 ? Math.ceil(totalDocs.totalDocs / limit) : 1
 
@@ -144,11 +166,20 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
 export const count: Count = async function count(this: SurrealAdapter, args) {
   const table = escapeIdent(getTableName(args.collection, this.tablePrefix))
   const where = buildRelationshipAwareWhere(this, args.collection, args.where)
-  const result = await this.client.query(
-    `SELECT count() AS count FROM ${table} ${where} GROUP ALL;`,
-  )
 
-  return { totalDocs: result[0]?.count ?? 0 }
+  try {
+    const result = await this.client.query(
+      `SELECT count() AS count FROM ${table} ${where} GROUP ALL;`,
+    )
+
+    return { totalDocs: result[0]?.count ?? 0 }
+  } catch (error) {
+    if (isMissingTableError(error)) {
+      return { totalDocs: 0 }
+    }
+
+    throw error
+  }
 }
 
 export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapter, args) {

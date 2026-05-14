@@ -36,6 +36,9 @@ const mapWriteError = (error) => {
     }
     throw error;
 };
+const isMissingTableError = (error) => {
+    return error instanceof Error && /table .* does not exist/i.test(error.message);
+};
 const normalizeDocs = (docs, select) => docs.map((doc) => applySelect(normalizeDocument(doc), select)).filter(Boolean);
 const getDepth = (args) => typeof args.depth === 'number' ? args.depth : 0;
 export const create = async function create(args) {
@@ -74,10 +77,18 @@ export const create = async function create(args) {
 export const findOne = (async function findOne(args) {
     const table = escapeIdent(getTableName(args.collection, this.tablePrefix));
     const where = buildRelationshipAwareWhere(this, args.collection, args.where);
-    const result = await this.client.query(`SELECT * FROM ${table} ${where} LIMIT 1;`);
-    const docs = normalizeDocs(result, args.select);
-    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args));
-    return populated[0] ?? null;
+    try {
+        const result = await this.client.query(`SELECT * FROM ${table} ${where} LIMIT 1;`);
+        const docs = normalizeDocs(result, args.select);
+        const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args));
+        return populated[0] ?? null;
+    }
+    catch (error) {
+        if (isMissingTableError(error)) {
+            return null;
+        }
+        throw error;
+    }
 });
 export const find = async function find(args) {
     const table = escapeIdent(getTableName(args.collection, this.tablePrefix));
@@ -85,7 +96,15 @@ export const find = async function find(args) {
     const where = buildRelationshipAwareWhere(this, args.collection, args.where);
     const sort = getSortSQL(args.sort);
     const limitSQL = limit > 0 ? `LIMIT ${limit} START ${start}` : '';
-    const docs = await this.client.query(`SELECT * FROM ${table} ${where} ${sort} ${limitSQL};`);
+    let docs = [];
+    try {
+        docs = await this.client.query(`SELECT * FROM ${table} ${where} ${sort} ${limitSQL};`);
+    }
+    catch (error) {
+        if (!isMissingTableError(error)) {
+            throw error;
+        }
+    }
     const totalDocs = await count.call(this, { collection: args.collection, req: args.req, where: args.where });
     const totalPages = limit > 0 ? Math.ceil(totalDocs.totalDocs / limit) : 1;
     return {
@@ -104,8 +123,16 @@ export const find = async function find(args) {
 export const count = async function count(args) {
     const table = escapeIdent(getTableName(args.collection, this.tablePrefix));
     const where = buildRelationshipAwareWhere(this, args.collection, args.where);
-    const result = await this.client.query(`SELECT count() AS count FROM ${table} ${where} GROUP ALL;`);
-    return { totalDocs: result[0]?.count ?? 0 };
+    try {
+        const result = await this.client.query(`SELECT count() AS count FROM ${table} ${where} GROUP ALL;`);
+        return { totalDocs: result[0]?.count ?? 0 };
+    }
+    catch (error) {
+        if (isMissingTableError(error)) {
+            return { totalDocs: 0 };
+        }
+        throw error;
+    }
 };
 export const updateOne = async function updateOne(args) {
     const collectionConfig = getCollectionConfig(this, args.collection);

@@ -137,6 +137,23 @@ npm run smoke:relationships
 
 Reads convert SurrealDB record IDs back to Payload IDs and support basic `depth` population for simple, hasMany, polymorphic, and upload relationships. Reverse `join` fields are resolved in batches for simple `collection`/`on` joins with count metadata, limit, and sort.
 
+## Demo validation harness
+
+The basic demo now includes a Playwright browser/API smoke that creates or logs in as the first admin user, opens Users and Posts in the admin UI, creates a Post through the REST API, verifies it through REST, and verifies the stored row with a direct SurrealDB SQL query.
+
+```bash
+npm install
+npm run build
+cd examples/basic
+cp .env.example .env
+npm install
+npx playwright install --with-deps chromium
+docker compose up -d surrealdb surrealist
+npm run smoke:demo -- --project=chromium
+```
+
+See [`docs/validation-harness.md`](./docs/validation-harness.md) for template validation commands and the compatibility matrix for `examples/basic`, Payload blank, website, and ecommerce.
+
 ## Payload monorepo test harness
 
 During development this adapter was wired into Payload's test matrix with `PAYLOAD_DATABASE=surrealdb`. The early targeted tests show the approach is viable, but many conformance suites remain to be implemented.

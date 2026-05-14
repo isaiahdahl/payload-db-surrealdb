@@ -1,0 +1,72 @@
+name: validation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    services:
+      surrealdb:
+        image: surrealdb/surrealdb:latest
+        ports:
+          - 8000:8000
+        command: start --user root --pass root memory
+
+    env:
+      SURREALDB_URL: http://127.0.0.1:8000
+      SURREALDB_USER: root
+      SURREALDB_PASS: root
+      SURREALDB_NAMESPACE: payload_demo
+      SURREALDB_DATABASE: payload_demo
+      PAYLOAD_SECRET: ci-secret-change-me
+      PAYLOAD_SMOKE_EMAIL: ci-admin@example.com
+      PAYLOAD_SMOKE_PASSWORD: ci-password-123456
+      NEXT_TELEMETRY_DISABLED: 1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            examples/basic/package-lock.json
+
+      - name: Install adapter dependencies
+        run: npm ci
+
+      - name: Build adapter
+        run: npm run build
+
+      - name: Adapter smoke
+        run: node smoke.mjs
+
+      - name: Install demo dependencies
+        working-directory: examples/basic
+        run: npm ci
+
+      - name: Install Playwright browser
+        working-directory: examples/basic
+        run: npx playwright install --with-deps chromium
+
+      - name: Generate demo types and import map
+        working-directory: examples/basic
+        run: |
+          npm run generate:types
+          npm run generate:importmap
+
+      - name: Build demo
+        working-directory: examples/basic
+        run: npm run build
+
+      - name: Demo browser/API/SurrealDB smoke
+        working-directory: examples/basic
+        run: npm run smoke:demo -- --project=chromium
