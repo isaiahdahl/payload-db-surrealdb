@@ -20,6 +20,7 @@ const getVersionBaseCollection = (adapter, collection) => {
     return getCollectionConfig(adapter, baseCollection) ? baseCollection : undefined;
 };
 const getVirtualAlias = (adapter, collection, path) => {
+    path = path.replaceAll('__', '.');
     const [root, ...rest] = path.split('.');
     if (root === 'version') {
         const baseCollection = getVersionBaseCollection(adapter, collection);
@@ -35,6 +36,7 @@ const getVirtualAlias = (adapter, collection, path) => {
     return virtualPath ? [virtualPath, ...rest].filter(Boolean).join('.') : undefined;
 };
 const isRelationshipPath = (adapter, collection, path) => {
+    path = path.replaceAll('__', '.');
     const [root, ...rest] = path.split('.');
     if (root === 'version') {
         const baseCollection = getVersionBaseCollection(adapter, collection);
@@ -92,7 +94,7 @@ const getComparableValue = (value) => {
 const compareValues = (a, b) => compareScalarValues(getComparableValue(a), getComparableValue(b));
 const toBoolean = (value) => value === 'false' ? false : Boolean(value);
 const parseNear = (value) => {
-    const parts = typeof value === 'string' ? value.split(',').map((part) => part.trim()) : [];
+    const parts = Array.isArray(value) ? value : (typeof value === 'string' ? value.split(',').map((part) => part.trim()) : []);
     if (parts.length < 2)
         return null;
     const nums = parts.map((part) => (part === 'null' || part === '' ? null : Number(part)));
@@ -204,7 +206,7 @@ const docMatchesWhere = (adapter, collection, doc, where) => {
             return value.every((entry) => docMatchesWhere(adapter, collection, doc, entry));
         if (normalizedKey === 'or' && Array.isArray(value))
             return value.some((entry) => docMatchesWhere(adapter, collection, doc, entry));
-        const path = getVirtualAlias(adapter, collection, key) ?? key;
+        const path = getVirtualAlias(adapter, collection, key) ?? key.replaceAll('__', '.');
         const actual = getValueAtPath(doc, path);
         if (value && typeof value === 'object' && !Array.isArray(value)) {
             return Object.entries(value).every(([operator, expected]) => matchesOperator(actual, operator, expected));
@@ -217,9 +219,9 @@ const getSortSQL = (sort) => {
     if (!values.length) {
         return 'ORDER BY createdAt DESC';
     }
-    const parts = values.map((sortValue) => {
-        const direction = sortValue.startsWith('-') ? 'DESC' : 'ASC';
-        const field = sortValue.replace(/^-/, '');
+    const parts = values.map((sortValue, index) => {
+        const direction = sortValue.startsWith('-') || (index > 0 && !sortValue.startsWith('+')) ? 'DESC' : 'ASC';
+        const field = sortValue.replace(/^-|^\+/, '');
         return `${pathToSQL(field)} ${direction}`;
     });
     return `ORDER BY ${parts.join(', ')}`;

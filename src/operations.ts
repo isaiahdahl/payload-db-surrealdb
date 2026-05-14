@@ -41,6 +41,7 @@ const getVersionBaseCollection = (adapter: SurrealAdapter, collection: string): 
 }
 
 const getVirtualAlias = (adapter: SurrealAdapter, collection: string, path: string): string | undefined => {
+  path = path.replaceAll('__', '.')
   const [root, ...rest] = path.split('.')
 
   if (root === 'version') {
@@ -64,6 +65,7 @@ const getVirtualAlias = (adapter: SurrealAdapter, collection: string, path: stri
 }
 
 const isRelationshipPath = (adapter: SurrealAdapter, collection: string, path: string): boolean => {
+  path = path.replaceAll('__', '.')
   const [root, ...rest] = path.split('.')
   if (root === 'version') {
     const baseCollection = getVersionBaseCollection(adapter, collection)
@@ -128,7 +130,7 @@ const compareValues = (a: unknown, b: unknown): number => compareScalarValues(ge
 const toBoolean = (value: unknown): boolean => value === 'false' ? false : Boolean(value)
 
 const parseNear = (value: unknown): [number, number, number | null, number | null] | null => {
-  const parts = typeof value === 'string' ? value.split(',').map((part) => part.trim()) : []
+  const parts = Array.isArray(value) ? value : (typeof value === 'string' ? value.split(',').map((part) => part.trim()) : [])
   if (parts.length < 2) return null
   const nums = parts.map((part) => (part === 'null' || part === '' ? null : Number(part)))
   if (typeof nums[0] !== 'number' || typeof nums[1] !== 'number' || Number.isNaN(nums[0]) || Number.isNaN(nums[1])) return null
@@ -233,7 +235,7 @@ const docMatchesWhere = (adapter: SurrealAdapter, collection: string, doc: Recor
     const normalizedKey = key.toLowerCase()
     if (normalizedKey === 'and' && Array.isArray(value)) return value.every((entry) => docMatchesWhere(adapter, collection, doc, entry))
     if (normalizedKey === 'or' && Array.isArray(value)) return value.some((entry) => docMatchesWhere(adapter, collection, doc, entry))
-    const path = getVirtualAlias(adapter, collection, key) ?? key
+    const path = getVirtualAlias(adapter, collection, key) ?? key.replaceAll('__', '.')
     const actual = getValueAtPath(doc, path)
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       return Object.entries(value as Record<string, unknown>).every(([operator, expected]) => matchesOperator(actual, operator, expected))
@@ -249,9 +251,9 @@ const getSortSQL = (sort?: string | string[]): string => {
     return 'ORDER BY createdAt DESC'
   }
 
-  const parts = values.map((sortValue) => {
-    const direction = sortValue.startsWith('-') ? 'DESC' : 'ASC'
-    const field = sortValue.replace(/^-/, '')
+  const parts = values.map((sortValue, index) => {
+    const direction = sortValue.startsWith('-') || (index > 0 && !sortValue.startsWith('+')) ? 'DESC' : 'ASC'
+    const field = sortValue.replace(/^-|^\+/, '')
 
     return `${pathToSQL(field)} ${direction}`
   })

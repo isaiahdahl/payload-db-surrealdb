@@ -11,6 +11,7 @@ type Field = {
 const simpleIdentifier = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 export const pathToSQL = (path: string): string => {
+  path = path.replaceAll('__', '.')
   if (path === 'id') {
     return 'meta::id(id)'
   }
