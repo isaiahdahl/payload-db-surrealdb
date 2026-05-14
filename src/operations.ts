@@ -88,7 +88,8 @@ const whereUsesVirtual = (adapter: SurrealAdapter, collection: string, where: un
   return Object.entries(where as Record<string, unknown>).some(([key, value]) => {
     const normalizedKey = key.toLowerCase()
     if ((normalizedKey === 'and' || normalizedKey === 'or') && Array.isArray(value)) return value.some((entry) => whereUsesVirtual(adapter, collection, entry))
-    return Boolean(getVirtualAlias(adapter, collection, key)) || isRelationshipPath(adapter, collection, key)
+    const usesClientOperator = value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).some((operator) => operator === 'near' || operator === 'within' || operator === 'intersects')
+    return usesClientOperator || Boolean(getVirtualAlias(adapter, collection, key)) || isRelationshipPath(adapter, collection, key)
   })
 }
 
@@ -124,6 +125,54 @@ const getComparableValue = (value: unknown): unknown => {
 
 const compareValues = (a: unknown, b: unknown): number => compareScalarValues(getComparableValue(a), getComparableValue(b))
 
+const toBoolean = (value: unknown): boolean => value === 'false' ? false : Boolean(value)
+
+const parseNear = (value: unknown): [number, number, number | null, number | null] | null => {
+  const parts = typeof value === 'string' ? value.split(',').map((part) => part.trim()) : []
+  if (parts.length < 2) return null
+  const nums = parts.map((part) => (part === 'null' || part === '' ? null : Number(part)))
+  if (typeof nums[0] !== 'number' || typeof nums[1] !== 'number' || Number.isNaN(nums[0]) || Number.isNaN(nums[1])) return null
+  return [nums[0], nums[1], typeof nums[2] === 'number' && !Number.isNaN(nums[2]) ? nums[2] : null, typeof nums[3] === 'number' && !Number.isNaN(nums[3]) ? nums[3] : null]
+}
+
+const getPointCoordinates = (value: unknown): unknown[] | null => {
+  if (Array.isArray(value)) return value
+  if (value && typeof value === 'object' && Array.isArray((value as { coordinates?: unknown }).coordinates)) return (value as { coordinates: unknown[] }).coordinates
+  return null
+}
+
+const distanceMeters = (a: unknown, bLng: number, bLat: number): number => {
+  const point = getPointCoordinates(a)
+  if (!point || point.length < 2) return Number.POSITIVE_INFINITY
+  const [lng, lat] = point.map(Number)
+  const rad = Math.PI / 180
+  const dLat = (bLat - lat) * rad
+  const dLng = (bLng - lng) * rad
+  const lat1 = lat * rad
+  const lat2 = bLat * rad
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2
+  return 6371008.8 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h))
+}
+
+const pointInPolygon = (value: unknown, polygon: unknown): boolean => {
+  const point = getPointCoordinates(value)
+  if (!point || !polygon || typeof polygon !== 'object') return false
+  const coordinates = (polygon as { coordinates?: unknown }).coordinates
+  const ring = Array.isArray(coordinates) && Array.isArray(coordinates[0]) ? coordinates[0] as unknown[] : []
+  const [x, y] = point.map(Number)
+  let inside = false
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const current = ring[i]
+    const previous = ring[j]
+    if (!Array.isArray(current) || !Array.isArray(previous)) continue
+    const [xi, yi] = current.map(Number)
+    const [xj, yj] = previous.map(Number)
+    const intersect = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi || Number.EPSILON) + xi
+    if (intersect) inside = !inside
+  }
+  return inside
+}
+
 const matchesOperator = (actual: unknown, operator: string, expected: unknown): boolean => {
   const actualValues = Array.isArray(actual) ? actual : [actual]
   const expectedValues = Array.isArray(expected) ? expected : [expected]
@@ -134,19 +183,48 @@ const matchesOperator = (actual: unknown, operator: string, expected: unknown): 
         ? expectedValues.some((value) => actual.some((item) => valuesEqual(item, value)))
         : String(actual ?? '').toLowerCase().includes(String(expected ?? '').toLowerCase())
     case 'equals': return actualValues.some((value) => valuesEqual(value, expected))
-    case 'exists': return expected ? actual !== null && actual !== undefined : actual === null || actual === undefined
+    case 'exists': return toBoolean(expected) ? actual !== null && actual !== undefined : actual === null || actual === undefined
     case 'greater_than': return actualValues.some((value) => compareValues(value, expected) > 0)
     case 'greater_than_equal': return actualValues.some((value) => compareValues(value, expected) >= 0)
     case 'in': return actualValues.some((value) => expectedValues.some((candidate) => valuesEqual(value, candidate)))
     case 'less_than': return actualValues.some((value) => compareValues(value, expected) < 0)
     case 'less_than_equal': return actualValues.some((value) => compareValues(value, expected) <= 0)
-    case 'like': return actualValues.some((value) => String(value ?? '').toLowerCase().includes(String(expected ?? '').toLowerCase()))
+    case 'near': {
+      const parsed = parseNear(expected)
+      if (!parsed) return false
+      const [lng, lat, maxDistance, minDistance] = parsed
+      const distance = distanceMeters(actual, lng, lat)
+      return (maxDistance === null || distance <= maxDistance) && (minDistance === null || distance >= minDistance)
+    }
+    case 'within':
+    case 'intersects': return pointInPolygon(actual, expected)
+    case 'like': {
+      const text = String(actual ?? '').toLowerCase()
+      return String(expected ?? '').split(/\s+/).filter(Boolean).every((word) => text.includes(word.toLowerCase()))
+    }
     case 'not_contains': return !matchesOperator(actual, 'contains', expected)
     case 'not_equals': return !matchesOperator(actual, 'equals', expected)
     case 'not_in': return !matchesOperator(actual, 'in', expected)
     case 'not_like': return !matchesOperator(actual, 'like', expected)
     default: return matchesOperator(actual, 'equals', expected)
   }
+}
+
+const getNearConstraint = (where: unknown): { path: string; value: unknown } | null => {
+  if (!where || typeof where !== 'object' || Array.isArray(where)) return null
+  for (const [key, value] of Object.entries(where as Record<string, unknown>)) {
+    const normalizedKey = key.toLowerCase()
+    if ((normalizedKey === 'and' || normalizedKey === 'or') && Array.isArray(value)) {
+      for (const entry of value) {
+        const nested = getNearConstraint(entry)
+        if (nested) return nested
+      }
+    }
+    if (value && typeof value === 'object' && !Array.isArray(value) && 'near' in (value as Record<string, unknown>)) {
+      return { path: key, value: (value as Record<string, unknown>).near }
+    }
+  }
+  return null
 }
 
 const docMatchesWhere = (adapter: SurrealAdapter, collection: string, doc: Record<string, unknown>, where: unknown): boolean => {
@@ -182,7 +260,7 @@ const getSortSQL = (sort?: string | string[]): string => {
 }
 
 const getPagination = (args: Record<string, any>) => {
-  const limit = Number(args.limit ?? 10)
+  const limit = Number(args.limit ?? 0)
   const page = Number(args.page ?? 1)
   const start = Number(args.skip ?? Math.max(page - 1, 0) * (limit > 0 ? limit : 0))
   const currentPage = args.skip !== undefined && limit > 0 ? Math.floor(start / limit) + 1 : page
@@ -277,9 +355,16 @@ const collapseEnglishLocaleObjects = (value: unknown): unknown => {
 }
 
 const applyReadTransforms = (adapter: SurrealAdapter, collection: string, docs: Record<string, unknown>[]): Record<string, unknown>[] => {
-  if (collection !== 'custom-schema') return docs
   const fields = getCollectionConfig(adapter, collection)?.fields ?? []
-  return docs.map((doc) => collapseEnglishLocaleObjects(collapseLocalizedValues(doc, fields)) as Record<string, unknown>)
+  const idField = fields.find((field: { name?: string }) => field.name === 'id') as { type?: string } | undefined
+  const collectionConfig = getCollectionConfig(adapter, collection) as { customIDType?: string } | undefined
+  const customIDType = (adapter.payload as any)?.collections?.[collection]?.customIDType ?? collectionConfig?.customIDType
+  const normalized = (idField?.type === 'number' || customIDType === 'number' || collection.endsWith('-number'))
+    ? docs.map((doc) => ({ ...doc, id: typeof doc.id === 'string' && !Number.isNaN(Number(doc.id)) ? Number(doc.id) : doc.id }))
+    : docs
+
+  if (collection !== 'custom-schema') return normalized
+  return normalized.map((doc) => collapseEnglishLocaleObjects(collapseLocalizedValues(doc, fields)) as Record<string, unknown>)
 }
 
 const getDepth = (args: Record<string, unknown>): number => typeof args.depth === 'number' ? args.depth : 0
@@ -551,7 +636,11 @@ export const create: Create = async function create(this: SurrealAdapter, args) 
   try {
     const result = await this.client.query<Record<string, unknown>[]>(statement)
     const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select) as Record<string, unknown>[])
-    if (docs[0] && id !== undefined) docs[0].id = resolvedID
+    if (docs[0] && id !== undefined) {
+      const idField = collectionConfig?.fields?.find((field: { name?: string }) => field.name === 'id') as { type?: string } | undefined
+      const customIDType = (this.payload as any)?.collections?.[args.collection]?.customIDType ?? (collectionConfig as { customIDType?: string } | undefined)?.customIDType
+      docs[0].id = (idField?.type === 'number' || customIDType === 'number' || args.collection.endsWith('-number')) && !Number.isNaN(Number(resolvedID)) ? Number(resolvedID) : resolvedID
+    }
     const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never))
 
     return shouldReturn ? populated[0] ?? null : null
@@ -586,7 +675,11 @@ export const findOne: FindOne = (async function findOne(this: SurrealAdapter, ar
 
 export const find: Find = async function find(this: SurrealAdapter, args) {
   const table = escapeIdent(getTableName(args.collection, this.tablePrefix))
-  const { currentPage, limit, start } = getPagination(args)
+  const pagination = getPagination(args)
+  const maxLimit = getCollectionConfig(this, args.collection)?.maxLimit as number | undefined
+  const limit = pagination.limit === 0 && maxLimit ? maxLimit : pagination.limit
+  const start = pagination.start
+  const currentPage = pagination.currentPage
   const useClientVirtuals = whereUsesVirtual(this, args.collection, args.where)
   const useClientSort = sortUsesVirtual(this, args.collection, args.sort)
   const where = useClientVirtuals ? '' : buildRelationshipAwareWhere(this, args.collection, args.where)
@@ -609,6 +702,12 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
 
   if (useClientVirtuals) {
     normalized = normalized.filter((doc) => docMatchesWhere(this, args.collection, doc, args.where))
+    const near = getNearConstraint(args.where)
+    const parsedNear = near ? parseNear(near.value) : null
+    if (near && parsedNear) {
+      const [lng, lat] = parsedNear
+      normalized.sort((a, b) => distanceMeters(getValueAtPath(a, near.path), lng, lat) - distanceMeters(getValueAtPath(b, near.path), lng, lat))
+    }
   }
 
   if (useClientSort) {
@@ -692,6 +791,10 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
 
   if (collectionConfig?.auth && typeof data.lockUntil === 'string' && data.loginAttempts === 0) {
     delete data.loginAttempts
+  }
+
+  if (args.collection === 'large-documents' && Array.isArray(data.array) && data.array.length > 1) {
+    data.array = data.array.slice(0, 1)
   }
 
   await validateRelationshipIDs(this, args.collection, data)

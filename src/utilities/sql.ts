@@ -39,6 +39,10 @@ export const normalizeID = (id: unknown): number | string => {
     }
   }
 
+  if (typeof id === 'number') {
+    return id
+  }
+
   return String(id)
 }
 

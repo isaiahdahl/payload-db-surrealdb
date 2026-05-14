@@ -28,6 +28,9 @@ export const normalizeID = (id) => {
             return normalizeID(candidate.id);
         }
     }
+    if (typeof id === 'number') {
+        return id;
+    }
     return String(id);
 };
 export const normalizeDocument = (doc) => {
