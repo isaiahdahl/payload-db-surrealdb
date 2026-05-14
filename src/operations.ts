@@ -33,21 +33,59 @@ const getVirtualPath = (adapter: SurrealAdapter, collection: string, field: stri
   return typeof candidate?.virtual === 'string' ? candidate.virtual : undefined
 }
 
+const getVirtualAlias = (adapter: SurrealAdapter, collection: string, path: string): string | undefined => {
+  const [root, ...rest] = path.split('.')
+  const virtualPath = getVirtualPath(adapter, collection, root)
+
+  return virtualPath ? [virtualPath, ...rest].filter(Boolean).join('.') : undefined
+}
+
 const whereUsesVirtual = (adapter: SurrealAdapter, collection: string, where: unknown): boolean => {
   if (!where || typeof where !== 'object' || Array.isArray(where)) return false
   return Object.entries(where as Record<string, unknown>).some(([key, value]) => {
     if ((key === 'and' || key === 'or') && Array.isArray(value)) return value.some((entry) => whereUsesVirtual(adapter, collection, entry))
-    return Boolean(getVirtualPath(adapter, collection, key))
+    return Boolean(getVirtualAlias(adapter, collection, key))
   })
 }
 
+const sortValues = (sort?: string | string[]): string[] => (Array.isArray(sort) ? sort : sort ? [sort] : [])
+  .flatMap((value) => String(value).split(','))
+  .map((value) => value.trim())
+  .filter(Boolean)
+
+const sortUsesVirtual = (adapter: SurrealAdapter, collection: string, sort?: string | string[]): boolean =>
+  sortValues(sort).some((value) => Boolean(getVirtualAlias(adapter, collection, value.replace(/^-/, ''))))
+
+const compareValues = (a: unknown, b: unknown): number => {
+  if (a === b) return 0
+  if (a === null || a === undefined) return 1
+  if (b === null || b === undefined) return -1
+  if (typeof a === 'number' && typeof b === 'number') return a - b
+  return String(a).localeCompare(String(b), undefined, { numeric: true })
+}
+
 const matchesOperator = (actual: unknown, operator: string, expected: unknown): boolean => {
+  const actualValues = Array.isArray(actual) ? actual : [actual]
+  const expectedValues = Array.isArray(expected) ? expected : [expected]
+
   switch (operator) {
-    case 'equals': return actual === expected
-    case 'not_equals': return actual !== expected
-    case 'like': return String(actual ?? '').toLowerCase().includes(String(expected ?? '').toLowerCase())
-    case 'in': return Array.isArray(expected) && expected.includes(actual)
-    default: return actual === expected
+    case 'contains':
+      return Array.isArray(actual)
+        ? expectedValues.some((value) => actual.some((item) => valuesEqual(item, value)))
+        : String(actual ?? '').toLowerCase().includes(String(expected ?? '').toLowerCase())
+    case 'equals': return actualValues.some((value) => valuesEqual(value, expected))
+    case 'exists': return expected ? actual !== null && actual !== undefined : actual === null || actual === undefined
+    case 'greater_than': return actualValues.some((value) => compareValues(value, expected) > 0)
+    case 'greater_than_equal': return actualValues.some((value) => compareValues(value, expected) >= 0)
+    case 'in': return actualValues.some((value) => expectedValues.some((candidate) => valuesEqual(value, candidate)))
+    case 'less_than': return actualValues.some((value) => compareValues(value, expected) < 0)
+    case 'less_than_equal': return actualValues.some((value) => compareValues(value, expected) <= 0)
+    case 'like': return actualValues.some((value) => String(value ?? '').toLowerCase().includes(String(expected ?? '').toLowerCase()))
+    case 'not_contains': return !matchesOperator(actual, 'contains', expected)
+    case 'not_equals': return !matchesOperator(actual, 'equals', expected)
+    case 'not_in': return !matchesOperator(actual, 'in', expected)
+    case 'not_like': return !matchesOperator(actual, 'like', expected)
+    default: return matchesOperator(actual, 'equals', expected)
   }
 }
 
@@ -56,7 +94,7 @@ const docMatchesWhere = (adapter: SurrealAdapter, collection: string, doc: Recor
   return Object.entries(where as Record<string, unknown>).every(([key, value]) => {
     if (key === 'and' && Array.isArray(value)) return value.every((entry) => docMatchesWhere(adapter, collection, doc, entry))
     if (key === 'or' && Array.isArray(value)) return value.some((entry) => docMatchesWhere(adapter, collection, doc, entry))
-    const path = getVirtualPath(adapter, collection, key) ?? key
+    const path = getVirtualAlias(adapter, collection, key) ?? key
     const actual = getValueAtPath(doc, path)
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       return Object.entries(value as Record<string, unknown>).every(([operator, expected]) => matchesOperator(actual, operator, expected))
@@ -66,16 +104,13 @@ const docMatchesWhere = (adapter: SurrealAdapter, collection: string, doc: Recor
 }
 
 const getSortSQL = (sort?: string | string[]): string => {
-  const sortValues = (Array.isArray(sort) ? sort : sort ? [sort] : [])
-    .flatMap((value) => String(value).split(','))
-    .map((value) => value.trim())
-    .filter(Boolean)
+  const values = sortValues(sort)
 
-  if (!sortValues.length) {
+  if (!values.length) {
     return 'ORDER BY createdAt DESC'
   }
 
-  const parts = sortValues.map((sortValue) => {
+  const parts = values.map((sortValue) => {
     const direction = sortValue.startsWith('-') ? 'DESC' : 'ASC'
     const field = sortValue.replace(/^-/, '')
 
@@ -309,6 +344,11 @@ export const create: Create = async function create(this: SurrealAdapter, args) 
 }
 
 export const findOne: FindOne = (async function findOne(this: SurrealAdapter, args) {
+  if (whereUsesVirtual(this, args.collection, args.where)) {
+    const result = await find.call(this, { ...args, limit: 1 })
+    return result.docs[0] ?? null
+  }
+
   const table = escapeIdent(getTableName(args.collection, this.tablePrefix))
   const where = buildRelationshipAwareWhere(this, args.collection, args.where)
 
@@ -331,11 +371,10 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
   const table = escapeIdent(getTableName(args.collection, this.tablePrefix))
   const { currentPage, limit, start } = getPagination(args)
   const useClientVirtuals = whereUsesVirtual(this, args.collection, args.where)
+  const useClientSort = sortUsesVirtual(this, args.collection, args.sort)
   const where = useClientVirtuals ? '' : buildRelationshipAwareWhere(this, args.collection, args.where)
-  const sortField = Array.isArray(args.sort) ? args.sort[0] : args.sort
-  const virtualSortPath = sortField ? getVirtualPath(this, args.collection, sortField.replace(/^-/, '')) : undefined
-  const sort = virtualSortPath ? '' : getSortSQL(args.sort)
-  const limitSQL = limit > 0 && !useClientVirtuals && !virtualSortPath ? `LIMIT ${limit} START ${start}` : ''
+  const sort = useClientSort ? '' : getSortSQL(args.sort)
+  const limitSQL = limit > 0 && !useClientVirtuals && !useClientSort ? `LIMIT ${limit} START ${start}` : ''
   let docs: Record<string, unknown>[] = []
 
   try {
@@ -348,23 +387,35 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
     }
   }
 
-  let normalized = await transformRelationshipReads(this, args.collection, applyReadTransforms(this, args.collection, normalizeDocs(docs, args.select) as Record<string, unknown>[]), Math.max(getDepth(args as never), useClientVirtuals || virtualSortPath ? 5 : 0))
+  const needsClientVirtualHandling = useClientVirtuals || useClientSort
+  let normalized = await transformRelationshipReads(this, args.collection, applyReadTransforms(this, args.collection, normalizeDocs(docs, needsClientVirtualHandling ? undefined : args.select) as Record<string, unknown>[]), Math.max(getDepth(args as never), needsClientVirtualHandling ? 5 : 0))
 
   if (useClientVirtuals) {
     normalized = normalized.filter((doc) => docMatchesWhere(this, args.collection, doc, args.where))
   }
 
-  if (virtualSortPath && sortField) {
-    const direction = sortField.startsWith('-') ? -1 : 1
-    normalized.sort((a, b) => direction * String(getValueAtPath(a, virtualSortPath) ?? '').localeCompare(String(getValueAtPath(b, virtualSortPath) ?? ''), undefined, { numeric: true }))
+  if (useClientSort) {
+    normalized.sort((a, b) => {
+      for (const sortValue of sortValues(args.sort)) {
+        const direction = sortValue.startsWith('-') ? -1 : 1
+        const field = sortValue.replace(/^-/, '')
+        const path = getVirtualAlias(this, args.collection, field) ?? field
+        const result = compareValues(getValueAtPath(a, path), getValueAtPath(b, path))
+
+        if (result !== 0) return direction * result
+      }
+
+      return 0
+    })
   }
 
-  const total = useClientVirtuals || virtualSortPath ? normalized.length : (await count.call(this, { collection: args.collection, req: args.req, where: args.where })).totalDocs
+  const total = needsClientVirtualHandling ? normalized.length : (await count.call(this, { collection: args.collection, req: args.req, where: args.where })).totalDocs
   const totalPages = limit > 0 ? Math.ceil(total / limit) : 1
-  const pageDocs = useClientVirtuals || virtualSortPath ? (limit > 0 ? normalized.slice(start, start + limit) : normalized) : normalized
+  const pageDocs = needsClientVirtualHandling ? (limit > 0 ? normalized.slice(start, start + limit) : normalized) : normalized
+  const selectedDocs = needsClientVirtualHandling ? pageDocs.map((doc) => applySelect(doc, args.select)).filter(Boolean) : pageDocs
 
   return {
-    docs: pageDocs,
+    docs: selectedDocs,
     hasNextPage: limit > 0 ? currentPage < totalPages : false,
     hasPrevPage: currentPage > 1,
     limit,
