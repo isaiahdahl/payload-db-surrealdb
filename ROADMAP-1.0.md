@@ -77,6 +77,8 @@ PAYLOAD_DATABASE=surrealdb pnpm test:int test/uploads/int.spec.ts
 PAYLOAD_DATABASE=surrealdb pnpm test:int test/dataloader/int.spec.ts
 ```
 
+Current relationships status: `test/relationships/int.spec.ts` is green at 57 passed / 3 skipped.
+
 Current uploads status: 100/102 passing after adapter fixes for upload cookie-fetch isolation and localized upload relationships in blocks. The two remaining local failures are environment-sensitive paste-url checks caused by nginx responding on `127.0.0.1:80` / `localhost:80` with 404 where the suite expects a failed/blocked fetch status of 500.
 
 Must support:

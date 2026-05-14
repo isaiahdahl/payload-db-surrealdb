@@ -1,19 +1,19 @@
 # payload-db-surrealdb
 
-Experimental **alpha** Payload CMS database adapter for [SurrealDB](https://surrealdb.com/).
+Alpha Payload CMS database adapter for [SurrealDB](https://surrealdb.com/).
 
-> Status: `0.1.0-alpha` quality. This package is a working proof of concept, not a production-ready Payload adapter yet.
+> Status: `0.2.0-alpha` quality. This adapter now passes several official Payload integration suites, but it is still pre-1.0 and not yet recommended for production workloads.
 
 ## Why this exists
 
-The goal is to explore a Payload adapter that keeps Mongo-like content fluidity while storing data in SurrealDB so other systems can query, link, enrich, and extend the same published datastore.
+The goal is to provide a Payload database adapter that keeps a Mongo-like, schemaless content model while storing documents in SurrealDB. That gives Payload applications flexible editorial modeling while keeping the same datastore externally queryable by other services.
 
 Potential long-term use cases:
 
 - schemaless Payload-managed content tables
-- SurrealDB as a shared read model
-- external Laravel/MySQL publish pipelines writing catalog data into SurrealDB
-- Payload editorial overlays and curated pages referencing external SurrealDB records
+- SurrealDB as a shared operational/read model
+- external publishing pipelines writing catalog or domain data into SurrealDB
+- Payload editorial overlays and curated pages referencing SurrealDB records
 - future AI/search/vector metadata attached outside Payload
 
 ## Installation
@@ -48,40 +48,71 @@ docker compose up -d
 
 The included compose file runs SurrealDB in memory on `localhost:8000` with `root:root` credentials.
 
-## Current working surface
+## Current compatibility
 
-This alpha currently has a basic executable adapter scaffold:
+This adapter is tested against Payload's own integration suites from a sibling Payload checkout using `PAYLOAD_DATABASE=surrealdb`.
 
-- adapter factory: `surrealAdapter()`
-- HTTP SurrealQL client using Node `fetch`
-- namespace/database bootstrap
-- schemaless table init for Payload collections
-- basic collection CRUD
-- simple `where` compiler
-- ID normalization from SurrealDB record IDs to Payload IDs
-- relationship/upload storage transforms for simple, hasMany, and polymorphic fields
-- basic relationship querying by ID and depth-based population
-- basic batched reverse join resolution for simple join fields
-- globals basics
-- migration file scaffolding basics
-- lightweight versions wrappers
+Currently green:
+
+| Suite | Result |
+| --- | --- |
+| `test/database/int.spec.ts` | 153 passed / 18 skipped |
+| `test/auth/int.spec.ts` | 66 passed |
+| `test/globals/int.spec.ts` | 13 passed |
+| `test/collections-rest/int.spec.ts` | 112 passed / 2 todo |
+| `test/collections-graphql/int.spec.ts` | 47 passed |
+| `test/relationships/int.spec.ts` | 57 passed / 3 skipped |
+
+Uploads status:
+
+- `test/uploads/int.spec.ts`: 100 passed / 2 environment-sensitive failures in the current local environment.
+- The remaining upload failures are paste-url localhost status expectations affected by a local nginx service responding on `127.0.0.1:80` with `404`; the adapter-side upload relationship and cookie-fetch issues have been fixed.
+
+Still to validate/fix before 1.0:
+
+- joins and dataloader suites
+- broader fields/select/sort/path suites
+- versions, drafts, localization, trash, locked documents, queues
+- admin/browser E2E flows across templates
+- package-install runtime checks in standalone Payload apps
+- concurrency and production durability hardening
+
+## Implemented surface
+
+Current alpha functionality includes:
+
+- `surrealAdapter()` Payload database adapter factory
+- SurrealDB HTTP `/sql` client using Node `fetch`
+- namespace/database/table bootstrap
+- schemaless collection and system tables
+- collection CRUD, count, upsert, bulk update/delete
+- globals CRUD with access `where` constraints
+- Payload ID normalization from SurrealDB record IDs
+- custom string and numeric IDs
+- relationship/upload write transforms and depth population
+- simple, hasMany, polymorphic, localized, nested/block relationship support
+- relationship where queries, including nested block/array paths
+- relationship sorting by related document properties
+- basic reverse join-field resolution
+- query operators used by Payload REST/GraphQL suites
+- geospatial point query fallbacks for `near`, `within`, and `intersects`
+- auth/session/account-lock flows
+- migrations collection lifecycle basics
+- lightweight collection/global version wrappers and draft query fallback
 - request-scoped SurrealQL transaction batching with commit/rollback
-- basic latest-version maintenance for collection/global versions and draft querying
+- transaction read-your-writes support for pending relationship validation
 
 ## Known limitations
 
-This is not production ready. Major missing/incomplete areas:
+This is not production ready. Important remaining gaps include:
 
-- fully interactive request-scoped transactions with read-your-writes semantics
-- complete relationship population parity for all nested/localized field shapes
-- complete join fields, including polymorphic joins and full pagination/filtering semantics
-- localization semantics
-- complete versions/drafts behavior
-- unique indexes and duplicate error mapping
-- robust migrations lifecycle
-- access/query edge cases
-- full Payload test-suite parity
-- performance/concurrency validation
+- no long-lived interactive SurrealDB transaction session over HTTP; writes are queued and committed atomically, but semantics are not yet equivalent to mature SQL adapters in every edge case
+- join fields need broader conformance, especially polymorphic joins and advanced pagination/filtering
+- localization and versions/drafts need dedicated suite hardening
+- unique indexes and duplicate error mapping need more concurrency validation
+- migrations are intentionally lightweight and schemaless, not a full schema-diff system
+- performance and N+1 characteristics need profiling under real admin/API workloads
+- full Payload test-suite parity is not complete
 
 ## Demo app
 
@@ -114,32 +145,44 @@ Namespace: payload_demo
 Database:  payload_demo
 ```
 
-## Transaction and versioning notes
-
-The adapter batches write statements for requests that carry `req.transactionID` and executes them in a single SurrealQL `BEGIN TRANSACTION ... COMMIT TRANSACTION` block on commit. Rollback discards queued writes. This gives atomic commit/rollback for adapter writes, including version/latest maintenance statements.
-
-Known concurrency limits remain: HTTP SurrealQL does not provide an interactive transaction session for reads before commit, so reads inside a pending transaction may not see queued writes. Version `latest` flags are maintained atomically at commit time, but high-contention autosave/publish workloads still need broader Payload conformance and concurrency testing before production use.
-
-## Development smoke test
-
-```bash
-npm run build
-docker compose up -d
-node smoke.mjs
-npm run smoke:relationships
-```
-
 ## Relationship storage semantics
 
 - Simple `relationship` and `upload` fields are stored as the related document ID scalar.
 - `hasMany` `relationship` and `upload` fields are stored as arrays of related document IDs.
 - Polymorphic relationships are stored as `{ relationTo, value }`, where `value` is the related document ID; polymorphic `hasMany` fields store arrays of those objects.
+- Localized relationships are stored by locale key and collapsed/populated according to Payload read semantics.
 
-Reads convert SurrealDB record IDs back to Payload IDs and support basic `depth` population for simple, hasMany, polymorphic, and upload relationships. Reverse `join` fields are resolved in batches for simple `collection`/`on` joins with count metadata, limit, and sort.
+Reads convert SurrealDB record IDs back to Payload IDs and support depth population for simple, hasMany, polymorphic, localized, nested/block, and upload relationships.
+
+## Migration philosophy
+
+This adapter intentionally follows a Mongo/Mongoose-like, schemaless philosophy rather than Payload's relational Drizzle/Postgres schema-diff model.
+
+Payload collection fields are not expanded into a large relational table graph. SurrealDB tables are bootstrapped schemaless, with lightweight table/index setup where useful. Migrations should mostly be explicit data transforms and operational bootstrap steps, not generated relational schema churn.
+
+## Development validation
+
+```bash
+npm run build
+npm run smoke
+npm run test:transactions
+npm run smoke:relationships
+```
+
+Payload integration examples from a sibling Payload checkout:
+
+```bash
+PAYLOAD_DATABASE=surrealdb corepack pnpm exec vitest --run --project int test/database/int.spec.ts
+PAYLOAD_DATABASE=surrealdb corepack pnpm exec vitest --run --project int test/auth/int.spec.ts
+PAYLOAD_DATABASE=surrealdb corepack pnpm exec vitest --run --project int test/globals/int.spec.ts
+PAYLOAD_DATABASE=surrealdb corepack pnpm exec vitest --run --project int test/collections-rest/int.spec.ts
+PAYLOAD_DATABASE=surrealdb corepack pnpm exec vitest --run --project int test/collections-graphql/int.spec.ts
+PAYLOAD_DATABASE=surrealdb corepack pnpm exec vitest --run --project int test/relationships/int.spec.ts
+```
 
 ## Demo validation harness
 
-The basic demo now includes a Playwright browser/API smoke that creates or logs in as the first admin user, opens Users and Posts in the admin UI, creates a Post through the REST API, verifies it through REST, and verifies the stored row with a direct SurrealDB SQL query.
+The basic demo includes a Playwright browser/API smoke that creates or logs in as the first admin user, opens Users and Posts in the admin UI, creates a Post through the REST API, verifies it through REST, and verifies the stored row with a direct SurrealDB SQL query.
 
 ```bash
 npm install
@@ -154,19 +197,15 @@ npm run smoke:demo -- --project=chromium
 
 See [`docs/validation-harness.md`](./docs/validation-harness.md) for template validation commands and the compatibility matrix for `examples/basic`, Payload blank, website, and ecommerce.
 
-## Payload monorepo test harness
+## Publishing status
 
-During development this adapter was wired into Payload's test matrix with `PAYLOAD_DATABASE=surrealdb`. The early targeted tests show the approach is viable, but many conformance suites remain to be implemented.
+`0.x` releases are alpha/experimental. Breaking changes should be expected until the adapter passes broad Payload conformance suites and demo/template E2E validation.
 
-Example from a sibling Payload checkout:
+Recommended publish command for this release:
 
 ```bash
-PAYLOAD_DATABASE=surrealdb corepack pnpm exec vitest --run --project int test/database/int.spec.ts
+npm publish --tag alpha --access public
 ```
-
-## Versioning
-
-`0.x` releases are alpha/experimental. Breaking changes should be expected until the adapter passes broad Payload database adapter conformance tests.
 
 ## License
 
