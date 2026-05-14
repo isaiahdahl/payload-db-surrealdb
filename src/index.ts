@@ -303,8 +303,18 @@ const findDistinct: FindDistinct = async function findDistinct(this: SurrealAdap
   const rawDocs = result.docs as Record<string, unknown>[]
   const populatedDocs = await transformRelationshipReads(this, args.collection, structuredClone(rawDocs), 5)
   const rows = rawDocs.map((doc, index) => ({ doc, populated: populatedDocs[index] ?? doc }))
+  const fieldRoot = fieldPath.split('.')[0]
+  const rootField = (getCollectionConfig(this, args.collection)?.fields ?? []).find((field: { name?: string }) => field.name === fieldRoot) as { hasMany?: boolean; relationTo?: string | string[]; type?: string } | undefined
+  const shouldKeyByPolymorphicRef = Boolean(
+    rootField
+      && rootField.type === 'relationship'
+      && rootField.hasMany
+      && Array.isArray(rootField.relationTo)
+      && fieldRoot
+      && fieldPath.startsWith(`${fieldRoot}.value`),
+  )
 
-  const entries: Array<{ sort: unknown; value: unknown }> = []
+  const entries: Array<{ distinctKey?: unknown; sort: unknown; value: unknown }> = []
 
   for (const row of rows) {
     const source = fieldPath.includes('.') || fieldPath !== args.field ? row.populated : row.doc
@@ -320,8 +330,13 @@ const findDistinct: FindDistinct = async function findDistinct(this: SurrealAdap
 
     const values = getValuesAtPath(source, fieldPath)
     const sorts = getValuesAtPath(row.populated, sortPath)
+    const polymorphicRefs = shouldKeyByPolymorphicRef && fieldRoot ? getValuesAtPath(row.doc, fieldRoot) : []
 
-    values.forEach((value, index) => entries.push({ sort: sorts[index] ?? sorts[0], value }))
+    values.forEach((value, index) => entries.push({
+      distinctKey: polymorphicRefs[index],
+      sort: sorts[index] ?? sorts[0],
+      value,
+    }))
   }
 
   entries.sort((left, right) => compareValues(left.sort, right.sort))
@@ -332,7 +347,7 @@ const findDistinct: FindDistinct = async function findDistinct(this: SurrealAdap
   for (const entry of entries) {
     const normalizedValue = normalizeDistinctValue(entry.value)
     if (normalizedValue === undefined) continue
-    const key = JSON.stringify(normalizedValue)
+    const key = JSON.stringify(entry.distinctKey === undefined ? normalizedValue : normalizeDistinctValue(entry.distinctKey))
 
     if (!seen.has(key)) {
       seen.add(key)
