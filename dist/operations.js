@@ -157,11 +157,27 @@ const collapseLocalizedValues = (value, fields = []) => {
     }
     return value;
 };
+const collapseEnglishLocaleObjects = (value) => {
+    if (Array.isArray(value)) {
+        return value.map(collapseEnglishLocaleObjects);
+    }
+    if (value && typeof value === 'object') {
+        const object = value;
+        const keys = Object.keys(object);
+        if (keys.length === 1 && keys[0] === 'en') {
+            return collapseEnglishLocaleObjects(object.en);
+        }
+        for (const key of keys) {
+            object[key] = collapseEnglishLocaleObjects(object[key]);
+        }
+    }
+    return value;
+};
 const applyReadTransforms = (adapter, collection, docs) => {
     if (collection !== 'custom-schema')
         return docs;
     const fields = getCollectionConfig(adapter, collection)?.fields ?? [];
-    return docs.map((doc) => collapseLocalizedValues(doc, fields));
+    return docs.map((doc) => collapseEnglishLocaleObjects(collapseLocalizedValues(doc, fields)));
 };
 const getDepth = (args) => typeof args.depth === 'number' ? args.depth : 0;
 const valuesEqual = (a, b) => JSON.stringify(a) === JSON.stringify(b);

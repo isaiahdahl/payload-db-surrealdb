@@ -194,10 +194,31 @@ const collapseLocalizedValues = (value: Record<string, unknown>, fields: any[] =
   return value
 }
 
+const collapseEnglishLocaleObjects = (value: unknown): unknown => {
+  if (Array.isArray(value)) {
+    return value.map(collapseEnglishLocaleObjects)
+  }
+
+  if (value && typeof value === 'object') {
+    const object = value as Record<string, unknown>
+    const keys = Object.keys(object)
+
+    if (keys.length === 1 && keys[0] === 'en') {
+      return collapseEnglishLocaleObjects(object.en)
+    }
+
+    for (const key of keys) {
+      object[key] = collapseEnglishLocaleObjects(object[key])
+    }
+  }
+
+  return value
+}
+
 const applyReadTransforms = (adapter: SurrealAdapter, collection: string, docs: Record<string, unknown>[]): Record<string, unknown>[] => {
   if (collection !== 'custom-schema') return docs
   const fields = getCollectionConfig(adapter, collection)?.fields ?? []
-  return docs.map((doc) => collapseLocalizedValues(doc, fields))
+  return docs.map((doc) => collapseEnglishLocaleObjects(collapseLocalizedValues(doc, fields)) as Record<string, unknown>)
 }
 
 const getDepth = (args: Record<string, unknown>): number => typeof args.depth === 'number' ? args.depth : 0
