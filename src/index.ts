@@ -321,14 +321,22 @@ const findDistinct: FindDistinct = async function findDistinct(this: SurrealAdap
 
     if (!fieldPath.includes('.') && (sortPath === fieldPath || sortPath.startsWith(`${fieldPath}.`)) && Array.isArray(row.doc[fieldPath]) && Array.isArray(row.populated?.[fieldPath])) {
       const sortRemainder = sortPath === fieldPath ? '' : sortPath.slice(fieldPath.length + 1)
+      const rawValues = row.doc[fieldPath] as unknown[]
+      if (!rawValues.length && rootField?.hasMany) {
+        entries.push({ sort: null, value: null })
+        continue
+      }
       const populatedValues = getValuesAtPath((row.populated as Record<string, unknown>)[fieldPath], '')
-      ;(row.doc[fieldPath] as unknown[]).forEach((value, index) => {
+      rawValues.forEach((value, index) => {
         entries.push({ sort: getValuesAtPath(populatedValues[index], sortRemainder)[0], value })
       })
       continue
     }
 
-    const values = getValuesAtPath(source, fieldPath)
+    let values = getValuesAtPath(source, fieldPath)
+    if (!values.length && rootField?.hasMany && fieldPath === fieldRoot) {
+      values = [null]
+    }
     const sorts = getValuesAtPath(row.populated, sortPath)
     const polymorphicRefs = shouldKeyByPolymorphicRef && fieldRoot ? getValuesAtPath(row.doc, fieldRoot) : []
 

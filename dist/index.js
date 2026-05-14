@@ -228,13 +228,21 @@ const findDistinct = async function findDistinct(args) {
         const source = fieldPath.includes('.') || fieldPath !== args.field ? row.populated : row.doc;
         if (!fieldPath.includes('.') && (sortPath === fieldPath || sortPath.startsWith(`${fieldPath}.`)) && Array.isArray(row.doc[fieldPath]) && Array.isArray(row.populated?.[fieldPath])) {
             const sortRemainder = sortPath === fieldPath ? '' : sortPath.slice(fieldPath.length + 1);
+            const rawValues = row.doc[fieldPath];
+            if (!rawValues.length && rootField?.hasMany) {
+                entries.push({ sort: null, value: null });
+                continue;
+            }
             const populatedValues = getValuesAtPath(row.populated[fieldPath], '');
-            row.doc[fieldPath].forEach((value, index) => {
+            rawValues.forEach((value, index) => {
                 entries.push({ sort: getValuesAtPath(populatedValues[index], sortRemainder)[0], value });
             });
             continue;
         }
-        const values = getValuesAtPath(source, fieldPath);
+        let values = getValuesAtPath(source, fieldPath);
+        if (!values.length && rootField?.hasMany && fieldPath === fieldRoot) {
+            values = [null];
+        }
         const sorts = getValuesAtPath(row.populated, sortPath);
         const polymorphicRefs = shouldKeyByPolymorphicRef && fieldRoot ? getValuesAtPath(row.doc, fieldRoot) : [];
         values.forEach((value, index) => entries.push({

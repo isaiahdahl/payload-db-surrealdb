@@ -66,8 +66,9 @@ const buildClause = (where, fields) => {
         return '';
     }
     const clauses = Object.entries(where).flatMap(([key, value]) => {
-        if ((key === 'and' || key === 'or') && Array.isArray(value)) {
-            const joiner = key === 'and' ? ' AND ' : ' OR ';
+        const normalizedKey = key.toLowerCase();
+        if ((normalizedKey === 'and' || normalizedKey === 'or') && Array.isArray(value)) {
+            const joiner = normalizedKey === 'and' ? ' AND ' : ' OR ';
             const nested = value.map((entry) => buildClause(entry, fields)).filter(Boolean);
             return nested.length ? [`(${nested.join(joiner)})`] : [];
         }

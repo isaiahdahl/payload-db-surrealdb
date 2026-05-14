@@ -53,7 +53,8 @@ const whereUsesVirtual = (adapter, collection, where) => {
     if (!where || typeof where !== 'object' || Array.isArray(where))
         return false;
     return Object.entries(where).some(([key, value]) => {
-        if ((key === 'and' || key === 'or') && Array.isArray(value))
+        const normalizedKey = key.toLowerCase();
+        if ((normalizedKey === 'and' || normalizedKey === 'or') && Array.isArray(value))
             return value.some((entry) => whereUsesVirtual(adapter, collection, entry));
         return Boolean(getVirtualAlias(adapter, collection, key)) || isRelationshipPath(adapter, collection, key);
     });
@@ -62,7 +63,10 @@ const sortValues = (sort) => (Array.isArray(sort) ? sort : sort ? [sort] : [])
     .flatMap((value) => String(value).split(','))
     .map((value) => value.trim())
     .filter(Boolean);
-const sortUsesVirtual = (adapter, collection, sort) => sortValues(sort).some((value) => Boolean(getVirtualAlias(adapter, collection, value.replace(/^-/, ''))));
+const sortUsesVirtual = (adapter, collection, sort) => sortValues(sort).some((value) => {
+    const path = value.replace(/^-/, '');
+    return Boolean(getVirtualAlias(adapter, collection, path)) || isRelationshipPath(adapter, collection, path);
+});
 const compareScalarValues = (a, b) => {
     if (a === b)
         return 0;
@@ -110,9 +114,10 @@ const docMatchesWhere = (adapter, collection, doc, where) => {
     if (!where || typeof where !== 'object' || Array.isArray(where))
         return true;
     return Object.entries(where).every(([key, value]) => {
-        if (key === 'and' && Array.isArray(value))
+        const normalizedKey = key.toLowerCase();
+        if (normalizedKey === 'and' && Array.isArray(value))
             return value.every((entry) => docMatchesWhere(adapter, collection, doc, entry));
-        if (key === 'or' && Array.isArray(value))
+        if (normalizedKey === 'or' && Array.isArray(value))
             return value.some((entry) => docMatchesWhere(adapter, collection, doc, entry));
         const path = getVirtualAlias(adapter, collection, key) ?? key;
         const actual = getValueAtPath(doc, path);

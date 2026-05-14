@@ -85,7 +85,8 @@ const isRelationshipPath = (adapter: SurrealAdapter, collection: string, path: s
 const whereUsesVirtual = (adapter: SurrealAdapter, collection: string, where: unknown): boolean => {
   if (!where || typeof where !== 'object' || Array.isArray(where)) return false
   return Object.entries(where as Record<string, unknown>).some(([key, value]) => {
-    if ((key === 'and' || key === 'or') && Array.isArray(value)) return value.some((entry) => whereUsesVirtual(adapter, collection, entry))
+    const normalizedKey = key.toLowerCase()
+    if ((normalizedKey === 'and' || normalizedKey === 'or') && Array.isArray(value)) return value.some((entry) => whereUsesVirtual(adapter, collection, entry))
     return Boolean(getVirtualAlias(adapter, collection, key)) || isRelationshipPath(adapter, collection, key)
   })
 }
@@ -96,7 +97,10 @@ const sortValues = (sort?: string | string[]): string[] => (Array.isArray(sort) 
   .filter(Boolean)
 
 const sortUsesVirtual = (adapter: SurrealAdapter, collection: string, sort?: string | string[]): boolean =>
-  sortValues(sort).some((value) => Boolean(getVirtualAlias(adapter, collection, value.replace(/^-/, ''))))
+  sortValues(sort).some((value) => {
+    const path = value.replace(/^-/, '')
+    return Boolean(getVirtualAlias(adapter, collection, path)) || isRelationshipPath(adapter, collection, path)
+  })
 
 const compareScalarValues = (a: unknown, b: unknown): number => {
   if (a === b) return 0
@@ -147,8 +151,9 @@ const matchesOperator = (actual: unknown, operator: string, expected: unknown): 
 const docMatchesWhere = (adapter: SurrealAdapter, collection: string, doc: Record<string, unknown>, where: unknown): boolean => {
   if (!where || typeof where !== 'object' || Array.isArray(where)) return true
   return Object.entries(where as Record<string, unknown>).every(([key, value]) => {
-    if (key === 'and' && Array.isArray(value)) return value.every((entry) => docMatchesWhere(adapter, collection, doc, entry))
-    if (key === 'or' && Array.isArray(value)) return value.some((entry) => docMatchesWhere(adapter, collection, doc, entry))
+    const normalizedKey = key.toLowerCase()
+    if (normalizedKey === 'and' && Array.isArray(value)) return value.every((entry) => docMatchesWhere(adapter, collection, doc, entry))
+    if (normalizedKey === 'or' && Array.isArray(value)) return value.some((entry) => docMatchesWhere(adapter, collection, doc, entry))
     const path = getVirtualAlias(adapter, collection, key) ?? key
     const actual = getValueAtPath(doc, path)
     if (value && typeof value === 'object' && !Array.isArray(value)) {
