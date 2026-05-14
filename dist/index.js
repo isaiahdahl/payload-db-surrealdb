@@ -157,16 +157,49 @@ const getValuesAtPath = (value, path) => {
     }
     return [undefined];
 };
+const getRelationshipID = (value) => {
+    if (value && typeof value === 'object' && 'id' in value) {
+        return value.id;
+    }
+    return value;
+};
+const normalizeDistinctValue = (value) => {
+    if (value && typeof value === 'object') {
+        const objectValue = value;
+        if (typeof objectValue.relationTo === 'string' && 'value' in objectValue) {
+            return {
+                relationTo: objectValue.relationTo,
+                value: getRelationshipID(objectValue.value),
+            };
+        }
+        if ('id' in objectValue) {
+            return objectValue.id;
+        }
+    }
+    return value;
+};
+const getSortableValue = (value) => {
+    if (value && typeof value === 'object') {
+        const objectValue = value;
+        if ('value' in objectValue) {
+            return getSortableValue(objectValue.value);
+        }
+        return objectValue.title ?? objectValue.name ?? objectValue.id ?? value;
+    }
+    return value;
+};
 const compareValues = (a, b) => {
-    if (a === b)
+    const left = getSortableValue(a);
+    const right = getSortableValue(b);
+    if (left === right)
         return 0;
-    if (a === undefined || a === null)
+    if (left === undefined || left === null)
         return 1;
-    if (b === undefined || b === null)
+    if (right === undefined || right === null)
         return -1;
-    if (typeof a === 'number' && typeof b === 'number')
-        return a - b;
-    return String(a).localeCompare(String(b), undefined, { numeric: true });
+    if (typeof left === 'number' && typeof right === 'number')
+        return left - right;
+    return String(left).localeCompare(String(right), undefined, { numeric: true });
 };
 const findDistinct = async function findDistinct(args) {
     const result = await find.call(this, {
@@ -185,8 +218,8 @@ const findDistinct = async function findDistinct(args) {
     const entries = [];
     for (const row of rows) {
         const source = fieldPath.includes('.') || fieldPath !== args.field ? row.populated : row.doc;
-        if (!fieldPath.includes('.') && sortPath.startsWith(`${fieldPath}.`) && Array.isArray(row.doc[fieldPath]) && Array.isArray(row.populated?.[fieldPath])) {
-            const sortRemainder = sortPath.slice(fieldPath.length + 1);
+        if (!fieldPath.includes('.') && (sortPath === fieldPath || sortPath.startsWith(`${fieldPath}.`)) && Array.isArray(row.doc[fieldPath]) && Array.isArray(row.populated?.[fieldPath])) {
+            const sortRemainder = sortPath === fieldPath ? '' : sortPath.slice(fieldPath.length + 1);
             const populatedValues = getValuesAtPath(row.populated[fieldPath], '');
             row.doc[fieldPath].forEach((value, index) => {
                 entries.push({ sort: getValuesAtPath(populatedValues[index], sortRemainder)[0], value });
@@ -201,7 +234,7 @@ const findDistinct = async function findDistinct(args) {
     const seen = new Set();
     const allValues = [];
     for (const entry of entries) {
-        const normalizedValue = entry.value && typeof entry.value === 'object' && 'id' in entry.value ? entry.value.id : entry.value;
+        const normalizedValue = normalizeDistinctValue(entry.value);
         if (normalizedValue === undefined)
             continue;
         const key = JSON.stringify(normalizedValue);

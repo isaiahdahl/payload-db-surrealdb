@@ -237,12 +237,56 @@ const getValuesAtPath = (value: unknown, path: string): unknown[] => {
   return [undefined]
 }
 
+const getRelationshipID = (value: unknown): unknown => {
+  if (value && typeof value === 'object' && 'id' in (value as Record<string, unknown>)) {
+    return (value as Record<string, unknown>).id
+  }
+
+  return value
+}
+
+const normalizeDistinctValue = (value: unknown): unknown => {
+  if (value && typeof value === 'object') {
+    const objectValue = value as Record<string, unknown>
+
+    if (typeof objectValue.relationTo === 'string' && 'value' in objectValue) {
+      return {
+        relationTo: objectValue.relationTo,
+        value: getRelationshipID(objectValue.value),
+      }
+    }
+
+    if ('id' in objectValue) {
+      return objectValue.id
+    }
+  }
+
+  return value
+}
+
+const getSortableValue = (value: unknown): unknown => {
+  if (value && typeof value === 'object') {
+    const objectValue = value as Record<string, unknown>
+
+    if ('value' in objectValue) {
+      return getSortableValue(objectValue.value)
+    }
+
+    return objectValue.title ?? objectValue.name ?? objectValue.id ?? value
+  }
+
+  return value
+}
+
 const compareValues = (a: unknown, b: unknown): number => {
-  if (a === b) return 0
-  if (a === undefined || a === null) return 1
-  if (b === undefined || b === null) return -1
-  if (typeof a === 'number' && typeof b === 'number') return a - b
-  return String(a).localeCompare(String(b), undefined, { numeric: true })
+  const left = getSortableValue(a)
+  const right = getSortableValue(b)
+
+  if (left === right) return 0
+  if (left === undefined || left === null) return 1
+  if (right === undefined || right === null) return -1
+  if (typeof left === 'number' && typeof right === 'number') return left - right
+  return String(left).localeCompare(String(right), undefined, { numeric: true })
 }
 
 const findDistinct: FindDistinct = async function findDistinct(this: SurrealAdapter, args) {
@@ -265,8 +309,8 @@ const findDistinct: FindDistinct = async function findDistinct(this: SurrealAdap
   for (const row of rows) {
     const source = fieldPath.includes('.') || fieldPath !== args.field ? row.populated : row.doc
 
-    if (!fieldPath.includes('.') && sortPath.startsWith(`${fieldPath}.`) && Array.isArray(row.doc[fieldPath]) && Array.isArray(row.populated?.[fieldPath])) {
-      const sortRemainder = sortPath.slice(fieldPath.length + 1)
+    if (!fieldPath.includes('.') && (sortPath === fieldPath || sortPath.startsWith(`${fieldPath}.`)) && Array.isArray(row.doc[fieldPath]) && Array.isArray(row.populated?.[fieldPath])) {
+      const sortRemainder = sortPath === fieldPath ? '' : sortPath.slice(fieldPath.length + 1)
       const populatedValues = getValuesAtPath((row.populated as Record<string, unknown>)[fieldPath], '')
       ;(row.doc[fieldPath] as unknown[]).forEach((value, index) => {
         entries.push({ sort: getValuesAtPath(populatedValues[index], sortRemainder)[0], value })
@@ -286,7 +330,7 @@ const findDistinct: FindDistinct = async function findDistinct(this: SurrealAdap
   const allValues = []
 
   for (const entry of entries) {
-    const normalizedValue = entry.value && typeof entry.value === 'object' && 'id' in (entry.value as Record<string, unknown>) ? (entry.value as Record<string, unknown>).id : entry.value
+    const normalizedValue = normalizeDistinctValue(entry.value)
     if (normalizedValue === undefined) continue
     const key = JSON.stringify(normalizedValue)
 
