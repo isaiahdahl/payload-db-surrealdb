@@ -1,4 +1,4 @@
-import { buildWhere } from '../queries/buildWhere.js';
+import { buildWhere, pathToSQL } from '../queries/buildWhere.js';
 import { getCollectionConfig } from './fields.js';
 import { escapeIdent, literal, normalizeDocument } from './sql.js';
 const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -109,7 +109,25 @@ export const transformRelationshipWrites = (data, fields = []) => {
     return data;
 };
 const collectRelationshipFields = (fields = []) => fields.filter(isRelationshipField);
-const collectJoinFields = (fields = []) => fields.filter((field) => field.type === 'join' && field.name);
+const collectJoinFields = (fields = [], prefix = []) => {
+    const joins = [];
+    for (const field of fields) {
+        if (field.type === 'join' && field.name) {
+            joins.push({ ...field, name: [...prefix, field.name].join('.') });
+            continue;
+        }
+        if (field.type === 'group' && field.name) {
+            joins.push(...collectJoinFields(field.fields ?? [], [...prefix, field.name]));
+            continue;
+        }
+        if (field.type === 'tabs') {
+            for (const tab of field.tabs ?? []) {
+                joins.push(...collectJoinFields(tab.fields ?? [], tab.name ? [...prefix, tab.name] : prefix));
+            }
+        }
+    }
+    return joins;
+};
 const getSortSQL = (sort) => {
     const sortValue = Array.isArray(sort) ? sort[0] : sort;
     if (!sortValue) {
@@ -282,7 +300,47 @@ const populateRelationshipFields = async (adapter, collection, docs, depth) => {
     };
     await populateFields(docs, getCollectionConfig(adapter, collection)?.fields);
 };
-const resolveJoinFields = async (adapter, collection, docs, depth) => {
+const getValueAtPath = (value, path) => {
+    const [head, ...tail] = path.split('.').filter(Boolean);
+    if (!head) {
+        return value;
+    }
+    if (Array.isArray(value)) {
+        return value.map((item) => getValueAtPath(item, path));
+    }
+    if (!isPlainObject(value)) {
+        return undefined;
+    }
+    return getValueAtPath(value[head], tail.join('.'));
+};
+const setValueAtPath = (doc, path, value) => {
+    const parts = path.split('.').filter(Boolean);
+    const last = parts.pop();
+    if (!last) {
+        return;
+    }
+    let target = doc;
+    for (const part of parts) {
+        if (!isPlainObject(target[part])) {
+            target[part] = {};
+        }
+        target = target[part];
+    }
+    target[last] = value;
+};
+const flattenJoinValues = (value) => {
+    if (Array.isArray(value)) {
+        return value.flatMap(flattenJoinValues);
+    }
+    if (isPlainObject(value) && 'value' in value) {
+        return flattenJoinValues(value.value);
+    }
+    if (isPlainObject(value)) {
+        return Object.values(value).flatMap(flattenJoinValues);
+    }
+    return value === null || value === undefined ? [] : [value];
+};
+const resolveJoinFields = async (adapter, collection, docs, depth, joins) => {
     if (!docs.length) {
         return;
     }
@@ -292,24 +350,35 @@ const resolveJoinFields = async (adapter, collection, docs, depth) => {
         if (!field.name || !field.collection || !field.on || !parentIDs.length) {
             continue;
         }
-        const limit = field.limit ?? field.defaultLimit ?? 10;
-        const targetTable = escapeIdent(field.collection.replaceAll('-', '_'));
-        const sort = getSortSQL(field.sort);
-        const targetDocs = normalizeFetchedDocs(await adapter.client.query(`SELECT * FROM ${targetTable} WHERE ${field.on} IN ${literal(parentIDs.map(String))} ${sort};`));
-        const populatedTargets = depth > 0 ? await transformRelationshipReads(adapter, field.collection, targetDocs, depth - 1) : targetDocs;
+        const joinOptions = joins?.[field.name] ?? undefined;
+        if (joinOptions === false) {
+            continue;
+        }
+        const limit = joinOptions?.limit ?? field.limit ?? field.defaultLimit ?? 10;
+        const collections = Array.isArray(field.collection) ? field.collection : [field.collection];
+        const sort = getSortSQL(joinOptions?.sort ?? field.sort ?? field.defaultSort);
         const byParent = new Map();
-        for (const [index, targetDoc] of targetDocs.entries()) {
-            const foreignValue = targetDoc[field.on];
-            const ids = Array.isArray(foreignValue) ? foreignValue : [foreignValue];
-            for (const id of ids) {
-                const key = String(id);
-                byParent.set(key, [...(byParent.get(key) ?? []), populatedTargets[index]]);
+        for (const targetCollection of collections) {
+            if (!targetCollection) {
+                continue;
+            }
+            const targetTable = escapeIdent(targetCollection.replaceAll('-', '_'));
+            const onPath = pathToSQL(field.on);
+            const targetDocs = normalizeFetchedDocs(await adapter.client.query(`SELECT * FROM ${targetTable} WHERE ${onPath} IN ${literal(parentIDs.map(String))} OR ${onPath} CONTAINSANY ${literal(parentIDs.map(String))} ${sort};`));
+            const populatedTargets = depth > 0 ? await transformRelationshipReads(adapter, targetCollection, targetDocs, depth - 1) : targetDocs;
+            for (const [index, targetDoc] of targetDocs.entries()) {
+                const foreignValue = getValueAtPath(targetDoc, field.on);
+                const ids = flattenJoinValues(foreignValue);
+                for (const id of ids) {
+                    const key = String(id);
+                    byParent.set(key, [...(byParent.get(key) ?? []), populatedTargets[index]]);
+                }
             }
         }
         for (const doc of docs) {
             const joined = byParent.get(String(doc.id)) ?? [];
             const pageDocs = limit > 0 ? joined.slice(0, limit) : joined;
-            doc[field.name] = field.hasMany === false
+            const value = field.hasMany === false
                 ? (pageDocs[0] ?? null)
                 : {
                     docs: pageDocs,
@@ -321,19 +390,20 @@ const resolveJoinFields = async (adapter, collection, docs, depth) => {
                     totalDocs: joined.length,
                     totalPages: limit > 0 ? Math.ceil(joined.length / limit) : 1,
                 };
+            setValueAtPath(doc, field.name, value);
         }
     }
 };
-export const transformRelationshipReads = async (adapter, collection, docs, depth = 0) => {
+export const transformRelationshipReads = async (adapter, collection, docs, depth = 0, joins) => {
     await populateRelationshipFields(adapter, collection, docs, depth);
-    await resolveJoinFields(adapter, collection, docs, depth);
+    await resolveJoinFields(adapter, collection, docs, depth, joins);
     const baseCollection = getVersionBaseCollection(adapter, collection);
     const versionDocs = baseCollection
         ? docs.map((doc) => doc.version).filter(isPlainObject)
         : [];
     if (baseCollection && versionDocs.length) {
         await populateRelationshipFields(adapter, baseCollection, versionDocs, depth);
-        await resolveJoinFields(adapter, baseCollection, versionDocs, depth);
+        await resolveJoinFields(adapter, baseCollection, versionDocs, depth, joins);
     }
     return docs;
 };

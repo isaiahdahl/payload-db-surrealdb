@@ -1,6 +1,6 @@
 import type { SurrealAdapter } from '../index.js'
 
-import { buildWhere } from '../queries/buildWhere.js'
+import { buildWhere, pathToSQL } from '../queries/buildWhere.js'
 import { getCollectionConfig } from './fields.js'
 import { escapeIdent, literal, normalizeDocument } from './sql.js'
 
@@ -9,7 +9,7 @@ type Field = {
     fields?: Field[]
     slug?: string
   }>
-  collection?: string
+  collection?: string | string[]
   defaultLimit?: number
   fields?: Field[]
   hasMany?: boolean
@@ -19,6 +19,7 @@ type Field = {
   on?: string
   relationTo?: string | string[]
   sort?: string | string[]
+  defaultSort?: string | string[]
   tabs?: Array<{
     fields?: Field[]
     localized?: boolean
@@ -170,7 +171,29 @@ export const transformRelationshipWrites = (data: Record<string, unknown>, field
 }
 
 const collectRelationshipFields = (fields: Field[] = []): Field[] => fields.filter(isRelationshipField)
-const collectJoinFields = (fields: Field[] = []): Field[] => fields.filter((field) => field.type === 'join' && field.name)
+const collectJoinFields = (fields: Field[] = [], prefix: string[] = []): Field[] => {
+  const joins: Field[] = []
+
+  for (const field of fields) {
+    if (field.type === 'join' && field.name) {
+      joins.push({ ...field, name: [...prefix, field.name].join('.') })
+      continue
+    }
+
+    if (field.type === 'group' && field.name) {
+      joins.push(...collectJoinFields(field.fields ?? [], [...prefix, field.name]))
+      continue
+    }
+
+    if (field.type === 'tabs') {
+      for (const tab of field.tabs ?? []) {
+        joins.push(...collectJoinFields(tab.fields ?? [], tab.name ? [...prefix, tab.name] : prefix))
+      }
+    }
+  }
+
+  return joins
+}
 
 const getSortSQL = (sort?: string | string[]): string => {
   const sortValue = Array.isArray(sort) ? sort[0] : sort
@@ -413,11 +436,65 @@ const populateRelationshipFields = async (
   await populateFields(docs, getCollectionConfig(adapter, collection)?.fields)
 }
 
+const getValueAtPath = (value: unknown, path: string): unknown => {
+  const [head, ...tail] = path.split('.').filter(Boolean)
+
+  if (!head) {
+    return value
+  }
+
+  if (Array.isArray(value)) {
+    return value.map((item) => getValueAtPath(item, path))
+  }
+
+  if (!isPlainObject(value)) {
+    return undefined
+  }
+
+  return getValueAtPath(value[head], tail.join('.'))
+}
+
+const setValueAtPath = (doc: Record<string, unknown>, path: string, value: unknown): void => {
+  const parts = path.split('.').filter(Boolean)
+  const last = parts.pop()
+
+  if (!last) {
+    return
+  }
+
+  let target = doc
+  for (const part of parts) {
+    if (!isPlainObject(target[part])) {
+      target[part] = {}
+    }
+    target = target[part] as Record<string, unknown>
+  }
+
+  target[last] = value
+}
+
+const flattenJoinValues = (value: unknown): unknown[] => {
+  if (Array.isArray(value)) {
+    return value.flatMap(flattenJoinValues)
+  }
+
+  if (isPlainObject(value) && 'value' in value) {
+    return flattenJoinValues(value.value)
+  }
+
+  if (isPlainObject(value)) {
+    return Object.values(value).flatMap(flattenJoinValues)
+  }
+
+  return value === null || value === undefined ? [] : [value]
+}
+
 const resolveJoinFields = async (
   adapter: SurrealAdapter,
   collection: string,
   docs: Record<string, unknown>[],
   depth: number,
+  joins?: Record<string, { limit?: number; page?: number; sort?: string | string[] } | false>,
 ): Promise<void> => {
   if (!docs.length) {
     return
@@ -431,32 +508,45 @@ const resolveJoinFields = async (
       continue
     }
 
-    const limit = field.limit ?? field.defaultLimit ?? 10
-    const targetTable = escapeIdent(field.collection.replaceAll('-', '_'))
-    const sort = getSortSQL(field.sort)
-    const targetDocs = normalizeFetchedDocs(
-      await adapter.client.query(
-        `SELECT * FROM ${targetTable} WHERE ${field.on} IN ${literal(parentIDs.map(String))} ${sort};`,
-      ) as Record<string, unknown>[],
-    )
-    const populatedTargets = depth > 0 ? await transformRelationshipReads(adapter, field.collection, targetDocs, depth - 1) : targetDocs
+    const joinOptions = joins?.[field.name] ?? undefined
+    if (joinOptions === false) {
+      continue
+    }
+
+    const limit = joinOptions?.limit ?? field.limit ?? field.defaultLimit ?? 10
+    const collections = Array.isArray(field.collection) ? field.collection : [field.collection]
+    const sort = getSortSQL(joinOptions?.sort ?? field.sort ?? field.defaultSort)
     const byParent = new Map<string, Record<string, unknown>[]>()
 
-    for (const [index, targetDoc] of targetDocs.entries()) {
-      const foreignValue = targetDoc[field.on]
-      const ids = Array.isArray(foreignValue) ? foreignValue : [foreignValue]
+    for (const targetCollection of collections) {
+      if (!targetCollection) {
+        continue
+      }
 
-      for (const id of ids) {
-        const key = String(id)
-        byParent.set(key, [...(byParent.get(key) ?? []), populatedTargets[index]])
+      const targetTable = escapeIdent(targetCollection.replaceAll('-', '_'))
+      const onPath = pathToSQL(field.on)
+      const targetDocs = normalizeFetchedDocs(
+        await adapter.client.query(
+          `SELECT * FROM ${targetTable} WHERE ${onPath} IN ${literal(parentIDs.map(String))} OR ${onPath} CONTAINSANY ${literal(parentIDs.map(String))} ${sort};`,
+        ) as Record<string, unknown>[],
+      )
+      const populatedTargets = depth > 0 ? await transformRelationshipReads(adapter, targetCollection, targetDocs, depth - 1) : targetDocs
+
+      for (const [index, targetDoc] of targetDocs.entries()) {
+        const foreignValue = getValueAtPath(targetDoc, field.on)
+        const ids = flattenJoinValues(foreignValue)
+
+        for (const id of ids) {
+          const key = String(id)
+          byParent.set(key, [...(byParent.get(key) ?? []), populatedTargets[index]])
+        }
       }
     }
 
     for (const doc of docs) {
       const joined = byParent.get(String(doc.id)) ?? []
       const pageDocs = limit > 0 ? joined.slice(0, limit) : joined
-
-      doc[field.name] = field.hasMany === false
+      const value = field.hasMany === false
         ? (pageDocs[0] ?? null)
         : {
             docs: pageDocs,
@@ -468,6 +558,8 @@ const resolveJoinFields = async (
             totalDocs: joined.length,
             totalPages: limit > 0 ? Math.ceil(joined.length / limit) : 1,
           }
+
+      setValueAtPath(doc, field.name, value)
     }
   }
 }
@@ -477,9 +569,10 @@ export const transformRelationshipReads = async <T extends Record<string, unknow
   collection: string,
   docs: T[],
   depth = 0,
+  joins?: Record<string, { limit?: number; page?: number; sort?: string | string[] } | false>,
 ): Promise<T[]> => {
   await populateRelationshipFields(adapter, collection, docs, depth)
-  await resolveJoinFields(adapter, collection, docs, depth)
+  await resolveJoinFields(adapter, collection, docs, depth, joins)
 
   const baseCollection = getVersionBaseCollection(adapter, collection)
   const versionDocs = baseCollection
@@ -488,7 +581,7 @@ export const transformRelationshipReads = async <T extends Record<string, unknow
 
   if (baseCollection && versionDocs.length) {
     await populateRelationshipFields(adapter, baseCollection, versionDocs, depth)
-    await resolveJoinFields(adapter, baseCollection, versionDocs, depth)
+    await resolveJoinFields(adapter, baseCollection, versionDocs, depth, joins)
   }
 
   return docs

@@ -169,9 +169,11 @@ const matchesOperator = (actual, operator, expected) => {
     switch (operator) {
         case 'contains':
             return Array.isArray(actual)
-                ? expectedValues.some((value) => actual.some((item) => valuesEqual(item, value)))
-                : String(actual ?? '').toLowerCase().includes(String(expected ?? '').toLowerCase());
-        case 'equals': return actualValues.some((value) => valuesEqual(value, expected));
+                ? expectedValues.some((value) => actual.some((item) => (typeof item === 'string' || typeof value === 'string'
+                    ? String(item ?? '').toLowerCase().includes(String(value ?? '').toLowerCase())
+                    : valuesEqual(item, value))))
+                : expectedValues.some((value) => String(actual ?? '').toLowerCase().includes(String(value ?? '').toLowerCase()));
+        case 'equals': return actualValues.some((value) => expectedValues.some((candidate) => valuesEqual(value, candidate)));
         case 'exists': return toBoolean(expected) ? actual !== null && actual !== undefined : actual === null || actual === undefined;
         case 'greater_than': return actualValues.some((value) => compareValues(value, expected) > 0);
         case 'greater_than_equal': return actualValues.some((value) => compareValues(value, expected) >= 0);
@@ -229,6 +231,12 @@ const resolveLocaleValue = (value, locale) => {
     }
     return value;
 };
+const unsafeJSONValue = /select\(|["'\\=]/i;
+const assertSafeClientQueryValue = (key, value) => {
+    if (key.startsWith('json.') && typeof value === 'string' && unsafeJSONValue.test(value)) {
+        throw new Error(`Unsafe query value for ${key}`);
+    }
+};
 const docMatchesWhere = (adapter, collection, doc, where, locale) => {
     if (!where || typeof where !== 'object' || Array.isArray(where))
         return true;
@@ -241,8 +249,12 @@ const docMatchesWhere = (adapter, collection, doc, where, locale) => {
         const path = getVirtualAlias(adapter, collection, key) ?? getLocalizedFieldPath(adapter, collection, key, locale) ?? key.replaceAll('__', '.');
         const actual = resolveLocaleValue(getValueAtPath(doc, path), locale);
         if (value && typeof value === 'object' && !Array.isArray(value)) {
-            return Object.entries(value).every(([operator, expected]) => matchesOperator(actual, operator, expected));
+            return Object.entries(value).every(([operator, expected]) => {
+                assertSafeClientQueryValue(key, expected);
+                return matchesOperator(actual, operator, expected);
+            });
         }
+        assertSafeClientQueryValue(key, value);
         return actual === value;
     });
 };
@@ -326,8 +338,14 @@ const getLocalizedFieldPath = (adapter, collection, path, locale) => {
         if (!field)
             return null;
         if (field.localized) {
-            output.push(localeKey);
-            output.push(...parts.slice(index + 1));
+            const remaining = parts.slice(index + 1);
+            if (typeof remaining[0] === 'string' && remaining[0].length === 2) {
+                output.push(...remaining);
+            }
+            else {
+                output.push(localeKey);
+                output.push(...remaining);
+            }
             return output.join('.');
         }
         if (field.type === 'tabs')
@@ -802,7 +820,7 @@ export const create = async function create(args) {
     const id = args.customID ?? args.data.id;
     const resolvedID = id ?? randomID();
     const isDuplicatedCreate = args.data.updatedAt !== undefined || args.data.createdAt !== undefined;
-    let data = transformRelationshipWrites(applyDefaults({ ...args.data }, collectionConfig?.fields), collectionConfig?.fields);
+    let data = transformRelationshipWrites(applyDefaults({ ...args.data }, collectionConfig?.fields, { locale: args.locale, req: args.req, user: args.req?.user }), collectionConfig?.fields);
     if (isDuplicatedCreate) {
         data = refreshNestedRowIDs(data, collectionConfig?.fields);
     }
@@ -836,7 +854,7 @@ export const create = async function create(args) {
             const customIDType = this.payload?.collections?.[args.collection]?.customIDType ?? collectionConfig?.customIDType;
             docs[0].id = (idField?.type === 'number' || customIDType === 'number' || args.collection.endsWith('-number')) && !Number.isNaN(Number(resolvedID)) ? Number(resolvedID) : resolvedID;
         }
-        const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args));
+        const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args), args.joins);
         return shouldReturn ? populated[0] ?? null : null;
     }
     catch (error) {
@@ -853,7 +871,7 @@ export const findOne = (async function findOne(args) {
     try {
         const result = await this.client.query(`SELECT * FROM ${table} ${where} LIMIT 1;`);
         const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select), args.locale, !args.draftsEnabled);
-        const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args));
+        const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args), args.joins);
         return populated[0] ?? null;
     }
     catch (error) {
@@ -889,9 +907,9 @@ export const find = async function find(args) {
     const baseDocs = applyReadTransforms(this, args.collection, [...normalizeDocs(docs, needsClientVirtualHandling ? undefined : args.select), ...transactionDocs], needsClientVirtualHandling ? 'all' : args.locale, !args.draftsEnabled);
     let normalized = needsClientVirtualHandling
         ? baseDocs
-        : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args));
+        : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args), args.joins);
     let workingDocs = needsClientVirtualHandling
-        ? await transformRelationshipReads(this, args.collection, structuredClone(baseDocs), Math.max(getDepth(args), 5))
+        ? await transformRelationshipReads(this, args.collection, structuredClone(baseDocs), Math.max(getDepth(args), 5), args.joins)
         : normalized;
     let workingIndexes = workingDocs.map((_, index) => index);
     if (useClientVirtuals) {
@@ -956,7 +974,7 @@ export const updateOne = async function updateOne(args) {
     const collectionConfig = getCollectionConfig(this, args.collection);
     const table = getTableName(args.collection, this.tablePrefix);
     const dottedData = Object.fromEntries(Object.entries(args.data).filter(([key]) => key.includes('.')));
-    let data = transformRelationshipWrites(applyDefaults({ ...args.data }, collectionConfig?.fields), collectionConfig?.fields);
+    let data = transformRelationshipWrites(applyDefaults({ ...args.data }, collectionConfig?.fields, { locale: args.locale, req: args.req, user: args.req?.user }), collectionConfig?.fields);
     Object.assign(data, dottedData);
     const shouldReturn = args.returning !== false;
     delete data.id;
@@ -989,7 +1007,7 @@ export const updateOne = async function updateOne(args) {
             try {
                 const result = await this.client.query(statement);
                 const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select), args.locale);
-                const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args));
+                const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args), args.joins);
                 return shouldReturn ? populated[0] ?? null : null;
             }
             catch (error) {
@@ -1021,7 +1039,7 @@ export const updateOne = async function updateOne(args) {
         try {
             const result = await this.client.query(statement);
             const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select), args.locale);
-            const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args));
+            const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args), args.joins);
             return shouldReturn ? populated[0] ?? null : null;
         }
         catch (error) {
@@ -1056,7 +1074,7 @@ export const updateOne = async function updateOne(args) {
     try {
         const result = await this.client.query(statement);
         const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select), args.locale);
-        const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args));
+        const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args), args.joins);
         return shouldReturn ? populated[0] ?? null : null;
     }
     catch (error) {

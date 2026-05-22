@@ -385,6 +385,7 @@ export function surrealAdapter(args = {}) {
         dbAdapter.client = createClient(dbAdapter);
         dbAdapter.dropDatabase = async () => { };
         dbAdapter.drizzle = {
+            _: { schema: undefined },
             delete: async (tableRef) => {
                 const table = tableRef === undefined
                     ? getTableName('payload_globals', dbAdapter.tablePrefix)

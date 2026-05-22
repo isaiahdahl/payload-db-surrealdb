@@ -3,9 +3,9 @@ export const hasTimestamps = (adapter, slug) => {
     const collection = getCollectionConfig(adapter, slug);
     return collection?.timestamps !== false;
 };
-const cloneDefault = (value) => {
+const cloneDefault = (value, context = {}) => {
     if (typeof value === 'function') {
-        return value();
+        return value(context);
     }
     if (value === undefined || value === null) {
         return value;
@@ -24,22 +24,26 @@ const getNestedFields = (field, value) => {
     return field.fields ?? [];
 };
 const isOperatorObject = (value) => Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).some((key) => key.startsWith('$')));
-const transformValueForWrite = (value, field) => {
+const transformValueForWrite = (value, field, context = {}) => {
     if (value === undefined || isOperatorObject(value)) {
         return value;
     }
     if (field.hasMany && Array.isArray(value)) {
-        return value.map((item) => transformValueForWrite(item, { ...field, hasMany: false }));
+        return value.map((item) => transformValueForWrite(item, { ...field, hasMany: false }, context));
     }
     if (field.localized && value === null) {
         return {};
+    }
+    if (field.localized && !context.insideLocalized && (Array.isArray(value) || (value !== undefined && (typeof value !== 'object' || value === null)))) {
+        const locale = typeof context.locale === 'string' ? context.locale : 'en';
+        return { [locale]: transformValueForWrite(value, { ...field, localized: false }, context) };
     }
     if (field.localized && value && typeof value === 'object' && !Array.isArray(value) && !isOperatorObject(value)) {
         return Object.fromEntries(Object.entries(value)
             .filter(([, localeValue]) => localeValue !== null && !((field.type === 'array' || field.type === 'blocks') && Array.isArray(localeValue) && localeValue.length === 0))
             .map(([locale, localeValue]) => [
             locale,
-            transformValueForWrite(localeValue, { ...field, localized: false }),
+            transformValueForWrite(localeValue, { ...field, localized: false }, { ...context, insideLocalized: true }),
         ]));
     }
     if (field.type === 'date') {
@@ -67,7 +71,7 @@ const transformValueForWrite = (value, field) => {
     if ((field.type === 'array' || field.type === 'blocks') && Array.isArray(value)) {
         return value.map((row) => {
             if (row && typeof row === 'object' && !Array.isArray(row)) {
-                const sanitized = sanitizeDataForWrite(row, getNestedFields(field, row));
+                const sanitized = sanitizeDataForWrite(row, getNestedFields(field, row), context);
                 if (field.type === 'blocks' && 'blockType' in row)
                     sanitized.blockType = row.blockType;
                 if ('id' in row)
@@ -82,12 +86,12 @@ const transformValueForWrite = (value, field) => {
         return value;
     }
     if (value && typeof value === 'object' && !Array.isArray(value)) {
-        return sanitizeDataForWrite(value, nestedFields);
+        return sanitizeDataForWrite(value, nestedFields, context);
     }
     return value;
 };
-export const applyDefaults = (data, fields = []) => sanitizeDataForWrite(data, fields);
-export const sanitizeDataForWrite = (data, fields = []) => {
+export const applyDefaults = (data, fields = [], context = {}) => sanitizeDataForWrite(data, fields, context);
+export const sanitizeDataForWrite = (data, fields = [], context = {}) => {
     if (!fields.length) {
         return { ...data };
     }
@@ -105,26 +109,26 @@ export const sanitizeDataForWrite = (data, fields = []) => {
                             ? Object.fromEntries(Object.entries(value).map(([locale, localeValue]) => [
                                 locale,
                                 localeValue && typeof localeValue === 'object' && !Array.isArray(localeValue)
-                                    ? sanitizeDataForWrite(localeValue, tab.fields ?? [])
+                                    ? sanitizeDataForWrite(localeValue, tab.fields ?? [], { ...context, insideLocalized: true })
                                     : localeValue,
                             ]))
-                            : sanitizeDataForWrite(value, tab.fields ?? []);
+                            : sanitizeDataForWrite(value, tab.fields ?? [], context);
                     }
                     else if (value === undefined) {
-                        const nested = sanitizeDataForWrite({}, tab.fields ?? []);
+                        const nested = sanitizeDataForWrite({}, tab.fields ?? [], context);
                         if (Object.keys(nested).length)
                             output[tab.name] = nested;
                     }
                 }
                 else {
-                    Object.assign(output, sanitizeDataForWrite(data, tab.fields ?? []));
+                    Object.assign(output, sanitizeDataForWrite(data, tab.fields ?? [], context));
                 }
             }
             continue;
         }
         if (!field.name) {
             if (field.fields?.length) {
-                Object.assign(output, sanitizeDataForWrite(data, field.fields));
+                Object.assign(output, sanitizeDataForWrite(data, field.fields, context));
             }
             continue;
         }
@@ -133,13 +137,13 @@ export const sanitizeDataForWrite = (data, fields = []) => {
         }
         let value = data[field.name];
         if (value === undefined && field.defaultValue !== undefined) {
-            value = cloneDefault(field.defaultValue);
+            value = cloneDefault(field.defaultValue, context);
         }
         if (value === undefined && field.type === 'select' && field.hasMany) {
             value = [];
         }
         if (value !== undefined) {
-            output[field.name] = transformValueForWrite(value, field);
+            output[field.name] = transformValueForWrite(value, field, context);
         }
     }
     return output;

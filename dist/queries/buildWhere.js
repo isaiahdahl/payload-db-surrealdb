@@ -1,5 +1,6 @@
 import { escapeIdent, literal } from '../utilities/sql.js';
 const simpleIdentifier = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const reservedIdentifiers = new Set(['select']);
 export const pathToSQL = (path) => {
     path = path.replaceAll('__', '.');
     if (path === 'id') {
@@ -8,7 +9,7 @@ export const pathToSQL = (path) => {
     return path
         .split('.')
         .filter(Boolean)
-        .map((part) => (simpleIdentifier.test(part) ? part : escapeIdent(part)))
+        .map((part) => (simpleIdentifier.test(part) && !reservedIdentifiers.has(part.toLowerCase()) ? part : escapeIdent(part)))
         .join('.');
 };
 const valueToSQL = (value) => literal(value);
@@ -42,10 +43,14 @@ const operatorToSQL = (field, operator, value, fields) => {
         switch (operator) {
             case 'equals':
             case 'contains':
-                return `${path} CONTAINS ${valueToSQL(normalizedValue)}`;
+                return Array.isArray(normalizedValue)
+                    ? `${path} CONTAINSANY ${valueToSQL(normalizedValue)}`
+                    : `${path} CONTAINS ${valueToSQL(normalizedValue)}`;
             case 'not_equals':
             case 'not_contains':
-                return `!(${path} CONTAINS ${valueToSQL(normalizedValue)})`;
+                return Array.isArray(normalizedValue)
+                    ? `!(${path} CONTAINSANY ${valueToSQL(normalizedValue)})`
+                    : `!(${path} CONTAINS ${valueToSQL(normalizedValue)})`;
             case 'in':
                 return `array::len(array::intersect(${path} ?? [], ${valueToSQL(Array.isArray(normalizedValue) ? normalizedValue : [normalizedValue])})) > 0`;
             case 'not_in':
@@ -70,7 +75,7 @@ const operatorToSQL = (field, operator, value, fields) => {
         case 'not_in':
             return `${path} NOT IN ${valueToSQL(Array.isArray(normalizedValue) ? normalizedValue : [normalizedValue])}`;
         case 'exists':
-            return normalizedValue ? `${path} != NONE` : `${path} = NONE`;
+            return normalizedValue ? `(${path} != NONE AND ${path} != NULL)` : `(${path} = NONE OR ${path} = NULL)`;
         case 'like': {
             const words = String(normalizedValue ?? '').split(/\s+/).filter(Boolean);
             return words.length
@@ -85,6 +90,15 @@ const operatorToSQL = (field, operator, value, fields) => {
             return `${path} = ${valueToSQL(normalizedValue)}`;
     }
 };
+const unsafeJSONValue = /select\(|["'\\=]/i;
+const assertSafeQueryValue = (key, value) => {
+    if (!key.startsWith('json.')) {
+        return;
+    }
+    if (typeof value === 'string' && unsafeJSONValue.test(value)) {
+        throw new Error(`Unsafe query value for ${key}`);
+    }
+};
 const buildClause = (where, fields) => {
     if (!where || Object.keys(where).length === 0) {
         return '';
@@ -97,8 +111,12 @@ const buildClause = (where, fields) => {
             return nested.length ? [`(${nested.join(joiner)})`] : [];
         }
         if (value && typeof value === 'object' && !Array.isArray(value)) {
-            return Object.entries(value).map(([operator, operatorValue]) => operatorToSQL(key, operator, operatorValue, fields));
+            return Object.entries(value).map(([operator, operatorValue]) => {
+                assertSafeQueryValue(key, operatorValue);
+                return operatorToSQL(key, operator, operatorValue, fields);
+            });
         }
+        assertSafeQueryValue(key, value);
         return [`${pathToSQL(key)} = ${valueToSQL(coerceValue(getFieldConfig(fields, key), value))}`];
     });
     return clauses.filter(Boolean).join(' AND ');

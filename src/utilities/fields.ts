@@ -28,9 +28,16 @@ export const hasTimestamps = (adapter: { payload?: { config?: { collections?: an
   return collection?.timestamps !== false
 }
 
-const cloneDefault = (value: unknown): unknown => {
+type FieldContext = {
+  insideLocalized?: boolean
+  locale?: string
+  req?: unknown
+  user?: unknown
+}
+
+const cloneDefault = (value: unknown, context: FieldContext = {}): unknown => {
   if (typeof value === 'function') {
-    return (value as () => unknown)()
+    return (value as (args: FieldContext) => unknown)(context)
   }
 
   if (value === undefined || value === null) {
@@ -58,17 +65,22 @@ const getNestedFields = (field: Field, value?: unknown): Field[] => {
 const isOperatorObject = (value: unknown): boolean =>
   Boolean(value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).some((key) => key.startsWith('$')))
 
-const transformValueForWrite = (value: unknown, field: Field): unknown => {
+const transformValueForWrite = (value: unknown, field: Field, context: FieldContext = {}): unknown => {
   if (value === undefined || isOperatorObject(value)) {
     return value
   }
 
   if (field.hasMany && Array.isArray(value)) {
-    return value.map((item) => transformValueForWrite(item, { ...field, hasMany: false }))
+    return value.map((item) => transformValueForWrite(item, { ...field, hasMany: false }, context))
   }
 
   if (field.localized && value === null) {
     return {}
+  }
+
+  if (field.localized && !context.insideLocalized && (Array.isArray(value) || (value !== undefined && (typeof value !== 'object' || value === null)))) {
+    const locale = typeof context.locale === 'string' ? context.locale : 'en'
+    return { [locale]: transformValueForWrite(value, { ...field, localized: false }, context) }
   }
 
   if (field.localized && value && typeof value === 'object' && !Array.isArray(value) && !isOperatorObject(value)) {
@@ -77,7 +89,7 @@ const transformValueForWrite = (value: unknown, field: Field): unknown => {
         .filter(([, localeValue]) => localeValue !== null && !((field.type === 'array' || field.type === 'blocks') && Array.isArray(localeValue) && localeValue.length === 0))
         .map(([locale, localeValue]) => [
           locale,
-          transformValueForWrite(localeValue, { ...field, localized: false }),
+          transformValueForWrite(localeValue, { ...field, localized: false }, { ...context, insideLocalized: true }),
         ]),
     )
   }
@@ -113,7 +125,7 @@ const transformValueForWrite = (value: unknown, field: Field): unknown => {
   if ((field.type === 'array' || field.type === 'blocks') && Array.isArray(value)) {
     return value.map((row) => {
       if (row && typeof row === 'object' && !Array.isArray(row)) {
-        const sanitized = sanitizeDataForWrite(row as Record<string, unknown>, getNestedFields(field, row))
+        const sanitized = sanitizeDataForWrite(row as Record<string, unknown>, getNestedFields(field, row), context)
         if (field.type === 'blocks' && 'blockType' in row) sanitized.blockType = (row as Record<string, unknown>).blockType
         if ('id' in row) sanitized.id = (row as Record<string, unknown>).id
         return sanitized
@@ -130,15 +142,15 @@ const transformValueForWrite = (value: unknown, field: Field): unknown => {
   }
 
   if (value && typeof value === 'object' && !Array.isArray(value)) {
-    return sanitizeDataForWrite(value as Record<string, unknown>, nestedFields)
+    return sanitizeDataForWrite(value as Record<string, unknown>, nestedFields, context)
   }
 
   return value
 }
 
-export const applyDefaults = (data: Record<string, unknown>, fields: Field[] = []): Record<string, unknown> => sanitizeDataForWrite(data, fields)
+export const applyDefaults = (data: Record<string, unknown>, fields: Field[] = [], context: FieldContext = {}): Record<string, unknown> => sanitizeDataForWrite(data, fields, context)
 
-export const sanitizeDataForWrite = (data: Record<string, unknown>, fields: Field[] = []): Record<string, unknown> => {
+export const sanitizeDataForWrite = (data: Record<string, unknown>, fields: Field[] = [], context: FieldContext = {}): Record<string, unknown> => {
   if (!fields.length) {
     return { ...data }
   }
@@ -159,16 +171,16 @@ export const sanitizeDataForWrite = (data: Record<string, unknown>, fields: Fiel
               ? Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([locale, localeValue]) => [
                   locale,
                   localeValue && typeof localeValue === 'object' && !Array.isArray(localeValue)
-                    ? sanitizeDataForWrite(localeValue as Record<string, unknown>, tab.fields ?? [])
+                    ? sanitizeDataForWrite(localeValue as Record<string, unknown>, tab.fields ?? [], { ...context, insideLocalized: true })
                     : localeValue,
                 ]))
-              : sanitizeDataForWrite(value as Record<string, unknown>, tab.fields ?? [])
+              : sanitizeDataForWrite(value as Record<string, unknown>, tab.fields ?? [], context)
           } else if (value === undefined) {
-            const nested = sanitizeDataForWrite({}, tab.fields ?? [])
+            const nested = sanitizeDataForWrite({}, tab.fields ?? [], context)
             if (Object.keys(nested).length) output[tab.name] = nested
           }
         } else {
-          Object.assign(output, sanitizeDataForWrite(data, tab.fields ?? []))
+          Object.assign(output, sanitizeDataForWrite(data, tab.fields ?? [], context))
         }
       }
 
@@ -177,7 +189,7 @@ export const sanitizeDataForWrite = (data: Record<string, unknown>, fields: Fiel
 
     if (!field.name) {
       if (field.fields?.length) {
-        Object.assign(output, sanitizeDataForWrite(data, field.fields))
+        Object.assign(output, sanitizeDataForWrite(data, field.fields, context))
       }
 
       continue
@@ -190,7 +202,7 @@ export const sanitizeDataForWrite = (data: Record<string, unknown>, fields: Fiel
     let value = data[field.name]
 
     if (value === undefined && field.defaultValue !== undefined) {
-      value = cloneDefault(field.defaultValue)
+      value = cloneDefault(field.defaultValue, context)
     }
 
     if (value === undefined && field.type === 'select' && field.hasMany) {
@@ -198,7 +210,7 @@ export const sanitizeDataForWrite = (data: Record<string, unknown>, fields: Fiel
     }
 
     if (value !== undefined) {
-      output[field.name] = transformValueForWrite(value, field)
+      output[field.name] = transformValueForWrite(value, field, context)
     }
   }
 

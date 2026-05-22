@@ -65,6 +65,7 @@ Currently green:
 | `test/localization/int.spec.ts` | 117 passed |
 | `test/versions/int.spec.ts` | 98 passed |
 | `test/dataloader/int.spec.ts` | 4 passed |
+| `test/fields/int.spec.ts` | 157 passed / 2 skipped |
 | `test/field-paths/int.spec.ts` | 2 passed |
 | `test/locked-documents/int.spec.ts` | 13 passed |
 
@@ -73,10 +74,9 @@ Known partial/failing suites from the current 1.0 validation sweep:
 | Suite | Current result |
 | --- | --- |
 | `test/uploads/int.spec.ts` | 100 passed / 2 environment-sensitive failures |
-| `test/joins/int.spec.ts` | fails during setup on join-field config shape (`field.collection` array handling) |
-| `test/fields/int.spec.ts` | fails during seed on defaultValue function invocation context |
+| `test/joins/int.spec.ts` | 49 passed / 1 skipped / 25 failed |
 | `test/select/int.spec.ts` | 102 passed / 13 failed |
-| `test/sort/int.spec.ts` | 31 passed / 6 failed |
+| `test/sort/int.spec.ts` | 30 passed / 7 failed |
 | `test/query-presets/int.spec.ts` | 10 passed / 1 skipped / 1 failed |
 | `test/trash/int.spec.ts` | 90 passed / 5 todo / 7 failed |
 | `test/queues/int.spec.ts` | 72 failed / 2 skipped |
@@ -89,7 +89,7 @@ Uploads status:
 Still to validate/fix before 1.0:
 
 - joins suite
-- broader fields/select/sort suites
+- select/sort suites
 - trash, locked documents, queues
 - admin/browser E2E flows across templates
 - package-install runtime checks in standalone Payload apps
@@ -126,7 +126,7 @@ This is not production ready. Important remaining gaps include:
 
 - no long-lived interactive SurrealDB transaction session over HTTP; writes are queued and committed atomically, but semantics are not yet equivalent to mature SQL adapters in every edge case
 - join fields need broader conformance, especially polymorphic joins and advanced pagination/filtering
-- field default function context, select projections, and multi-field sort parity still need broader suite hardening
+- select projections, multi-field sort parity, join where/access/localization/version edges, and queue/trash behavior still need broader suite hardening
 - unique indexes and duplicate error mapping need more concurrency validation
 - migrations are intentionally lightweight and schemaless, not a full schema-diff system
 - performance and N+1 characteristics need profiling under real admin/API workloads

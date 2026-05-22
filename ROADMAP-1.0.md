@@ -59,10 +59,10 @@ PAYLOAD_DATABASE=surrealdb pnpm test:int test/query-presets/int.spec.ts
 
 Current status from the latest sweep:
 
+- `test/fields/int.spec.ts`: 157 passed / 2 skipped.
 - `test/field-paths/int.spec.ts`: 2 passed.
-- `test/fields/int.spec.ts`: fails during seed because defaultValue functions need Payload-style invocation context.
 - `test/select/int.spec.ts`: 102 passed / 13 failed.
-- `test/sort/int.spec.ts`: 31 passed / 6 failed, mostly multi-field/numeric sort parity.
+- `test/sort/int.spec.ts`: 30 passed / 7 failed, mostly multi-field/numeric sort parity.
 - `test/query-presets/int.spec.ts`: 10 passed / 1 skipped / 1 failed (query preset lockout access edge case).
 
 Must support:
@@ -91,7 +91,7 @@ Current relationships status: `test/relationships/int.spec.ts` is green at 57 pa
 
 Current dataloader status: `test/dataloader/int.spec.ts` is green at 4 passed.
 
-Current joins status: `test/joins/int.spec.ts` fails during setup on join-field config shape handling (`field.collection` can be non-string / array-like in the official suite). Broader join conformance is still a 1.0 blocker.
+Current joins status: `test/joins/int.spec.ts` now gets through setup and is partially passing at 49 passed / 1 skipped / 25 failed. Remaining failures are join where filters, localized/versioned joins, access filtering, pagination, and collection-array result shape.
 
 Current uploads status: 100/102 passing after adapter fixes for upload cookie-fetch isolation and localized upload relationships in blocks. The two remaining local failures are environment-sensitive paste-url checks caused by nginx responding on `127.0.0.1:80` / `localhost:80` with 404 where the suite expects a failed/blocked fetch status of 500.
 

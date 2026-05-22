@@ -4,7 +4,7 @@ type Field = {
         fields?: Field[];
         slug?: string;
     }>;
-    collection?: string;
+    collection?: string | string[];
     defaultLimit?: number;
     fields?: Field[];
     hasMany?: boolean;
@@ -14,6 +14,7 @@ type Field = {
     on?: string;
     relationTo?: string | string[];
     sort?: string | string[];
+    defaultSort?: string | string[];
     tabs?: Array<{
         fields?: Field[];
         localized?: boolean;
@@ -27,7 +28,11 @@ export declare const relationshipStorageSemantics: {
     readonly polymorphic: "polymorphic relationship fields store { relationTo, value } objects, or arrays of them for hasMany";
 };
 export declare const transformRelationshipWrites: (data: Record<string, unknown>, fields?: Field[]) => Record<string, unknown>;
-export declare const transformRelationshipReads: <T extends Record<string, unknown>>(adapter: SurrealAdapter, collection: string, docs: T[], depth?: number) => Promise<T[]>;
+export declare const transformRelationshipReads: <T extends Record<string, unknown>>(adapter: SurrealAdapter, collection: string, docs: T[], depth?: number, joins?: Record<string, {
+    limit?: number;
+    page?: number;
+    sort?: string | string[];
+} | false>) => Promise<T[]>;
 export declare const transformRelationshipWhere: (collectionConfig: {
     fields?: Field[];
 } | undefined, where: unknown) => unknown;

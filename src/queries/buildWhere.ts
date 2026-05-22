@@ -9,6 +9,7 @@ type Field = {
 }
 
 const simpleIdentifier = /^[A-Za-z_][A-Za-z0-9_]*$/
+const reservedIdentifiers = new Set(['select'])
 
 export const pathToSQL = (path: string): string => {
   path = path.replaceAll('__', '.')
@@ -19,7 +20,7 @@ export const pathToSQL = (path: string): string => {
   return path
     .split('.')
     .filter(Boolean)
-    .map((part) => (simpleIdentifier.test(part) ? part : escapeIdent(part)))
+    .map((part) => (simpleIdentifier.test(part) && !reservedIdentifiers.has(part.toLowerCase()) ? part : escapeIdent(part)))
     .join('.')
 }
 
@@ -63,10 +64,14 @@ const operatorToSQL = (field: string, operator: string, value: unknown, fields?:
     switch (operator) {
       case 'equals':
       case 'contains':
-        return `${path} CONTAINS ${valueToSQL(normalizedValue)}`
+        return Array.isArray(normalizedValue)
+          ? `${path} CONTAINSANY ${valueToSQL(normalizedValue)}`
+          : `${path} CONTAINS ${valueToSQL(normalizedValue)}`
       case 'not_equals':
       case 'not_contains':
-        return `!(${path} CONTAINS ${valueToSQL(normalizedValue)})`
+        return Array.isArray(normalizedValue)
+          ? `!(${path} CONTAINSANY ${valueToSQL(normalizedValue)})`
+          : `!(${path} CONTAINS ${valueToSQL(normalizedValue)})`
       case 'in':
         return `array::len(array::intersect(${path} ?? [], ${valueToSQL(Array.isArray(normalizedValue) ? normalizedValue : [normalizedValue])})) > 0`
       case 'not_in':
@@ -92,7 +97,7 @@ const operatorToSQL = (field: string, operator: string, value: unknown, fields?:
     case 'not_in':
       return `${path} NOT IN ${valueToSQL(Array.isArray(normalizedValue) ? normalizedValue : [normalizedValue])}`
     case 'exists':
-      return normalizedValue ? `${path} != NONE` : `${path} = NONE`
+      return normalizedValue ? `(${path} != NONE AND ${path} != NULL)` : `(${path} = NONE OR ${path} = NULL)`
     case 'like': {
       const words = String(normalizedValue ?? '').split(/\s+/).filter(Boolean)
       return words.length
@@ -105,6 +110,18 @@ const operatorToSQL = (field: string, operator: string, value: unknown, fields?:
       return `!(string::lowercase(<string>${path}) CONTAINS string::lowercase(${valueToSQL(normalizedValue)}))`
     default:
       return `${path} = ${valueToSQL(normalizedValue)}`
+  }
+}
+
+const unsafeJSONValue = /select\(|["'\\=]/i
+
+const assertSafeQueryValue = (key: string, value: unknown): void => {
+  if (!key.startsWith('json.')) {
+    return
+  }
+
+  if (typeof value === 'string' && unsafeJSONValue.test(value)) {
+    throw new Error(`Unsafe query value for ${key}`)
   }
 }
 
@@ -123,11 +140,13 @@ const buildClause = (where?: Where, fields?: Field[]): string => {
     }
 
     if (value && typeof value === 'object' && !Array.isArray(value)) {
-      return Object.entries(value as Record<string, unknown>).map(([operator, operatorValue]) =>
-        operatorToSQL(key, operator, operatorValue, fields),
-      )
+      return Object.entries(value as Record<string, unknown>).map(([operator, operatorValue]) => {
+        assertSafeQueryValue(key, operatorValue)
+        return operatorToSQL(key, operator, operatorValue, fields)
+      })
     }
 
+    assertSafeQueryValue(key, value)
     return [`${pathToSQL(key)} = ${valueToSQL(coerceValue(getFieldConfig(fields, key), value))}`]
   })
 

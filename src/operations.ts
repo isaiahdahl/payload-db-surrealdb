@@ -208,9 +208,13 @@ const matchesOperator = (actual: unknown, operator: string, expected: unknown): 
   switch (operator) {
     case 'contains':
       return Array.isArray(actual)
-        ? expectedValues.some((value) => actual.some((item) => valuesEqual(item, value)))
-        : String(actual ?? '').toLowerCase().includes(String(expected ?? '').toLowerCase())
-    case 'equals': return actualValues.some((value) => valuesEqual(value, expected))
+        ? expectedValues.some((value) => actual.some((item) => (
+            typeof item === 'string' || typeof value === 'string'
+              ? String(item ?? '').toLowerCase().includes(String(value ?? '').toLowerCase())
+              : valuesEqual(item, value)
+          )))
+        : expectedValues.some((value) => String(actual ?? '').toLowerCase().includes(String(value ?? '').toLowerCase()))
+    case 'equals': return actualValues.some((value) => expectedValues.some((candidate) => valuesEqual(value, candidate)))
     case 'exists': return toBoolean(expected) ? actual !== null && actual !== undefined : actual === null || actual === undefined
     case 'greater_than': return actualValues.some((value) => compareValues(value, expected) > 0)
     case 'greater_than_equal': return actualValues.some((value) => compareValues(value, expected) >= 0)
@@ -269,6 +273,14 @@ const resolveLocaleValue = (value: unknown, locale?: unknown): unknown => {
   return value
 }
 
+const unsafeJSONValue = /select\(|["'\\=]/i
+
+const assertSafeClientQueryValue = (key: string, value: unknown): void => {
+  if (key.startsWith('json.') && typeof value === 'string' && unsafeJSONValue.test(value)) {
+    throw new Error(`Unsafe query value for ${key}`)
+  }
+}
+
 const docMatchesWhere = (adapter: SurrealAdapter, collection: string, doc: Record<string, unknown>, where: unknown, locale?: unknown): boolean => {
   if (!where || typeof where !== 'object' || Array.isArray(where)) return true
   return Object.entries(where as Record<string, unknown>).every(([key, value]) => {
@@ -278,8 +290,12 @@ const docMatchesWhere = (adapter: SurrealAdapter, collection: string, doc: Recor
     const path = getVirtualAlias(adapter, collection, key) ?? getLocalizedFieldPath(adapter, collection, key, locale) ?? key.replaceAll('__', '.')
     const actual = resolveLocaleValue(getValueAtPath(doc, path), locale)
     if (value && typeof value === 'object' && !Array.isArray(value)) {
-      return Object.entries(value as Record<string, unknown>).every(([operator, expected]) => matchesOperator(actual, operator, expected))
+      return Object.entries(value as Record<string, unknown>).every(([operator, expected]) => {
+        assertSafeClientQueryValue(key, expected)
+        return matchesOperator(actual, operator, expected)
+      })
     }
+    assertSafeClientQueryValue(key, value)
     return actual === value
   })
 }
@@ -384,8 +400,13 @@ const getLocalizedFieldPath = (adapter: SurrealAdapter, collection: string, path
     if (!field) return null
 
     if (field.localized) {
-      output.push(localeKey)
-      output.push(...parts.slice(index + 1))
+      const remaining = parts.slice(index + 1)
+      if (typeof remaining[0] === 'string' && remaining[0].length === 2) {
+        output.push(...remaining)
+      } else {
+        output.push(localeKey)
+        output.push(...remaining)
+      }
       return output.join('.')
     }
 
@@ -906,7 +927,7 @@ export const create: Create = async function create(this: SurrealAdapter, args) 
   const id = args.customID ?? args.data.id
   const resolvedID = id ?? randomID()
   const isDuplicatedCreate = args.data.updatedAt !== undefined || args.data.createdAt !== undefined
-  let data = transformRelationshipWrites(applyDefaults({ ...args.data }, collectionConfig?.fields), collectionConfig?.fields)
+  let data = transformRelationshipWrites(applyDefaults({ ...args.data }, collectionConfig?.fields, { locale: args.locale, req: args.req, user: args.req?.user }), collectionConfig?.fields)
   if (isDuplicatedCreate) {
     data = refreshNestedRowIDs(data, collectionConfig?.fields)
   }
@@ -945,7 +966,7 @@ export const create: Create = async function create(this: SurrealAdapter, args) 
       const customIDType = (this.payload as any)?.collections?.[args.collection]?.customIDType ?? (collectionConfig as { customIDType?: string } | undefined)?.customIDType
       docs[0].id = (idField?.type === 'number' || customIDType === 'number' || args.collection.endsWith('-number')) && !Number.isNaN(Number(resolvedID)) ? Number(resolvedID) : resolvedID
     }
-    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never))
+    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
 
     return shouldReturn ? populated[0] ?? null : null
   } catch (error) {
@@ -965,7 +986,7 @@ export const findOne: FindOne = (async function findOne(this: SurrealAdapter, ar
   try {
     const result = await this.client.query<Record<string, unknown>[]>(`SELECT * FROM ${table} ${where} LIMIT 1;`)
     const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select) as Record<string, unknown>[], args.locale, !(args as Record<string, unknown>).draftsEnabled)
-    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never))
+    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
 
     return populated[0] ?? null
   } catch (error) {
@@ -1006,9 +1027,9 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
   const baseDocs = applyReadTransforms(this, args.collection, [...normalizeDocs(docs, needsClientVirtualHandling ? undefined : args.select) as Record<string, unknown>[], ...transactionDocs], needsClientVirtualHandling ? 'all' : args.locale, !(args as Record<string, unknown>).draftsEnabled)
   let normalized = needsClientVirtualHandling
     ? baseDocs
-    : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args as never))
+    : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
   let workingDocs = needsClientVirtualHandling
-    ? await transformRelationshipReads(this, args.collection, structuredClone(baseDocs), Math.max(getDepth(args as never), 5))
+    ? await transformRelationshipReads(this, args.collection, structuredClone(baseDocs), Math.max(getDepth(args as never), 5), (args as Record<string, unknown>).joins as never)
     : normalized
   let workingIndexes = workingDocs.map((_, index) => index)
 
@@ -1085,7 +1106,7 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
   const collectionConfig = getCollectionConfig(this, args.collection)
   const table = getTableName(args.collection, this.tablePrefix)
   const dottedData = Object.fromEntries(Object.entries(args.data).filter(([key]) => key.includes('.')))
-  let data = transformRelationshipWrites(applyDefaults({ ...args.data }, collectionConfig?.fields), collectionConfig?.fields)
+  let data = transformRelationshipWrites(applyDefaults({ ...args.data }, collectionConfig?.fields, { locale: args.locale, req: args.req, user: args.req?.user }), collectionConfig?.fields)
   Object.assign(data, dottedData)
   const shouldReturn = args.returning !== false
 
@@ -1124,7 +1145,7 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
       try {
         const result = await this.client.query<Record<string, unknown>[]>(statement)
         const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select) as Record<string, unknown>[], args.locale)
-        const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never))
+        const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
 
         return shouldReturn ? populated[0] ?? null : null
       } catch (error) {
@@ -1158,7 +1179,7 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
     try {
       const result = await this.client.query<Record<string, unknown>[]>(statement)
       const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select) as Record<string, unknown>[], args.locale)
-      const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never))
+      const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
 
       return shouldReturn ? populated[0] ?? null : null
     } catch (error) {
@@ -1197,7 +1218,7 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
   try {
     const result = await this.client.query<Record<string, unknown>[]>(statement)
     const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select) as Record<string, unknown>[], args.locale)
-    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never))
+    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
 
     return shouldReturn ? populated[0] ?? null : null
   } catch (error) {
