@@ -32,6 +32,8 @@ PAYLOAD_DATABASE=surrealdb pnpm test:int test/collections-rest/int.spec.ts
 PAYLOAD_DATABASE=surrealdb pnpm test:int test/collections-graphql/int.spec.ts
 ```
 
+Current status: all Gate 1 suites are green in the latest sweep.
+
 Must support:
 
 - create/find/findOne/update/delete/count/upsert
@@ -54,6 +56,14 @@ PAYLOAD_DATABASE=surrealdb pnpm test:int test/select/int.spec.ts
 PAYLOAD_DATABASE=surrealdb pnpm test:int test/field-paths/int.spec.ts
 PAYLOAD_DATABASE=surrealdb pnpm test:int test/query-presets/int.spec.ts
 ```
+
+Current status from the latest sweep:
+
+- `test/field-paths/int.spec.ts`: 2 passed.
+- `test/fields/int.spec.ts`: fails during seed because defaultValue functions need Payload-style invocation context.
+- `test/select/int.spec.ts`: 102 passed / 13 failed.
+- `test/sort/int.spec.ts`: 31 passed / 6 failed, mostly multi-field/numeric sort parity.
+- `test/query-presets/int.spec.ts`: 10 passed / 1 skipped / 1 failed (query preset lockout access edge case).
 
 Must support:
 
@@ -79,6 +89,10 @@ PAYLOAD_DATABASE=surrealdb pnpm test:int test/dataloader/int.spec.ts
 
 Current relationships status: `test/relationships/int.spec.ts` is green at 57 passed / 3 skipped.
 
+Current dataloader status: `test/dataloader/int.spec.ts` is green at 4 passed.
+
+Current joins status: `test/joins/int.spec.ts` fails during setup on join-field config shape handling (`field.collection` can be non-string / array-like in the official suite). Broader join conformance is still a 1.0 blocker.
+
 Current uploads status: 100/102 passing after adapter fixes for upload cookie-fetch isolation and localized upload relationships in blocks. The two remaining local failures are environment-sensitive paste-url checks caused by nginx responding on `127.0.0.1:80` / `localhost:80` with 404 where the suite expects a failed/blocked fetch status of 500.
 
 Must support:
@@ -102,6 +116,8 @@ PAYLOAD_DATABASE=surrealdb pnpm test:int test/trash/int.spec.ts
 PAYLOAD_DATABASE=surrealdb pnpm test:int test/locked-documents/int.spec.ts
 PAYLOAD_DATABASE=surrealdb pnpm test:int test/queues/int.spec.ts
 ```
+
+Current status: `test/versions/int.spec.ts` is green at 98 passed, `test/localization/int.spec.ts` is green at 117 passed, and `test/locked-documents/int.spec.ts` is green at 13 passed. `test/trash/int.spec.ts` is partially passing at 90 passed / 5 todo / 7 failed. `test/queues/int.spec.ts` currently fails broadly (72 failed / 2 skipped), starting with duplicate user seeding / queue concurrency behavior.
 
 Must support:
 

@@ -16,6 +16,7 @@ type Field = {
     sort?: string | string[];
     tabs?: Array<{
         fields?: Field[];
+        localized?: boolean;
         name?: string;
     }>;
     type?: string;

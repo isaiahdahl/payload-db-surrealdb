@@ -31,8 +31,13 @@ const transformValueForWrite = (value, field) => {
     if (field.hasMany && Array.isArray(value)) {
         return value.map((item) => transformValueForWrite(item, { ...field, hasMany: false }));
     }
+    if (field.localized && value === null) {
+        return {};
+    }
     if (field.localized && value && typeof value === 'object' && !Array.isArray(value) && !isOperatorObject(value)) {
-        return Object.fromEntries(Object.entries(value).map(([locale, localeValue]) => [
+        return Object.fromEntries(Object.entries(value)
+            .filter(([, localeValue]) => localeValue !== null && !((field.type === 'array' || field.type === 'blocks') && Array.isArray(localeValue) && localeValue.length === 0))
+            .map(([locale, localeValue]) => [
             locale,
             transformValueForWrite(localeValue, { ...field, localized: false }),
         ]));
@@ -96,7 +101,14 @@ export const sanitizeDataForWrite = (data, fields = []) => {
                 if (tab.name) {
                     const value = data[tab.name];
                     if (value && typeof value === 'object' && !Array.isArray(value)) {
-                        output[tab.name] = sanitizeDataForWrite(value, tab.fields ?? []);
+                        output[tab.name] = tab.localized
+                            ? Object.fromEntries(Object.entries(value).map(([locale, localeValue]) => [
+                                locale,
+                                localeValue && typeof localeValue === 'object' && !Array.isArray(localeValue)
+                                    ? sanitizeDataForWrite(localeValue, tab.fields ?? [])
+                                    : localeValue,
+                            ]))
+                            : sanitizeDataForWrite(value, tab.fields ?? []);
                     }
                     else if (value === undefined) {
                         const nested = sanitizeDataForWrite({}, tab.fields ?? []);
@@ -122,6 +134,9 @@ export const sanitizeDataForWrite = (data, fields = []) => {
         let value = data[field.name];
         if (value === undefined && field.defaultValue !== undefined) {
             value = cloneDefault(field.defaultValue);
+        }
+        if (value === undefined && field.type === 'select' && field.hasMany) {
+            value = [];
         }
         if (value !== undefined) {
             output[field.name] = transformValueForWrite(value, field);

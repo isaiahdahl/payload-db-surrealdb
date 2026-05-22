@@ -21,6 +21,7 @@ type Field = {
   sort?: string | string[]
   tabs?: Array<{
     fields?: Field[]
+    localized?: boolean
     name?: string
   }>
   type?: string
@@ -142,7 +143,13 @@ export const transformRelationshipWrites = (data: Record<string, unknown>, field
       for (const tab of field.tabs ?? []) {
         if (tab.name) {
           if (isPlainObject(data[tab.name])) {
-            transformRelationshipWrites(data[tab.name] as Record<string, unknown>, tab.fields ?? [])
+            if (tab.localized) {
+              for (const localeValue of Object.values(data[tab.name] as Record<string, unknown>)) {
+                if (isPlainObject(localeValue)) transformRelationshipWrites(localeValue, tab.fields ?? [])
+              }
+            } else {
+              transformRelationshipWrites(data[tab.name] as Record<string, unknown>, tab.fields ?? [])
+            }
           }
         } else {
           transformRelationshipWrites(data, tab.fields ?? [])

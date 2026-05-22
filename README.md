@@ -62,6 +62,24 @@ Currently green:
 | `test/collections-rest/int.spec.ts` | 112 passed / 2 todo |
 | `test/collections-graphql/int.spec.ts` | 47 passed |
 | `test/relationships/int.spec.ts` | 57 passed / 3 skipped |
+| `test/localization/int.spec.ts` | 117 passed |
+| `test/versions/int.spec.ts` | 98 passed |
+| `test/dataloader/int.spec.ts` | 4 passed |
+| `test/field-paths/int.spec.ts` | 2 passed |
+| `test/locked-documents/int.spec.ts` | 13 passed |
+
+Known partial/failing suites from the current 1.0 validation sweep:
+
+| Suite | Current result |
+| --- | --- |
+| `test/uploads/int.spec.ts` | 100 passed / 2 environment-sensitive failures |
+| `test/joins/int.spec.ts` | fails during setup on join-field config shape (`field.collection` array handling) |
+| `test/fields/int.spec.ts` | fails during seed on defaultValue function invocation context |
+| `test/select/int.spec.ts` | 102 passed / 13 failed |
+| `test/sort/int.spec.ts` | 31 passed / 6 failed |
+| `test/query-presets/int.spec.ts` | 10 passed / 1 skipped / 1 failed |
+| `test/trash/int.spec.ts` | 90 passed / 5 todo / 7 failed |
+| `test/queues/int.spec.ts` | 72 failed / 2 skipped |
 
 Uploads status:
 
@@ -70,9 +88,9 @@ Uploads status:
 
 Still to validate/fix before 1.0:
 
-- joins and dataloader suites
-- broader fields/select/sort/path suites
-- versions, drafts, localization, trash, locked documents, queues
+- joins suite
+- broader fields/select/sort suites
+- trash, locked documents, queues
 - admin/browser E2E flows across templates
 - package-install runtime checks in standalone Payload apps
 - concurrency and production durability hardening
@@ -98,7 +116,7 @@ Current alpha functionality includes:
 - geospatial point query fallbacks for `near`, `within`, and `intersects`
 - auth/session/account-lock flows
 - migrations collection lifecycle basics
-- lightweight collection/global version wrappers and draft query fallback
+- collection/global versions, drafts, autosave, localized drafts, and publish-specific-locale behavior
 - request-scoped SurrealQL transaction batching with commit/rollback
 - transaction read-your-writes support for pending relationship validation
 
@@ -108,7 +126,7 @@ This is not production ready. Important remaining gaps include:
 
 - no long-lived interactive SurrealDB transaction session over HTTP; writes are queued and committed atomically, but semantics are not yet equivalent to mature SQL adapters in every edge case
 - join fields need broader conformance, especially polymorphic joins and advanced pagination/filtering
-- localization and versions/drafts need dedicated suite hardening
+- field default function context, select projections, and multi-field sort parity still need broader suite hardening
 - unique indexes and duplicate error mapping need more concurrency validation
 - migrations are intentionally lightweight and schemaless, not a full schema-diff system
 - performance and N+1 characteristics need profiling under real admin/API workloads

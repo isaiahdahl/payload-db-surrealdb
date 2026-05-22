@@ -11,6 +11,7 @@ type Field = {
   name?: string
   tabs?: Array<{
     fields?: Field[]
+    localized?: boolean
     name?: string
   }>
   type?: string
@@ -66,12 +67,18 @@ const transformValueForWrite = (value: unknown, field: Field): unknown => {
     return value.map((item) => transformValueForWrite(item, { ...field, hasMany: false }))
   }
 
+  if (field.localized && value === null) {
+    return {}
+  }
+
   if (field.localized && value && typeof value === 'object' && !Array.isArray(value) && !isOperatorObject(value)) {
     return Object.fromEntries(
-      Object.entries(value as Record<string, unknown>).map(([locale, localeValue]) => [
-        locale,
-        transformValueForWrite(localeValue, { ...field, localized: false }),
-      ]),
+      Object.entries(value as Record<string, unknown>)
+        .filter(([, localeValue]) => localeValue !== null && !((field.type === 'array' || field.type === 'blocks') && Array.isArray(localeValue) && localeValue.length === 0))
+        .map(([locale, localeValue]) => [
+          locale,
+          transformValueForWrite(localeValue, { ...field, localized: false }),
+        ]),
     )
   }
 
@@ -148,7 +155,14 @@ export const sanitizeDataForWrite = (data: Record<string, unknown>, fields: Fiel
         if (tab.name) {
           const value = data[tab.name]
           if (value && typeof value === 'object' && !Array.isArray(value)) {
-            output[tab.name] = sanitizeDataForWrite(value as Record<string, unknown>, tab.fields ?? [])
+            output[tab.name] = tab.localized
+              ? Object.fromEntries(Object.entries(value as Record<string, unknown>).map(([locale, localeValue]) => [
+                  locale,
+                  localeValue && typeof localeValue === 'object' && !Array.isArray(localeValue)
+                    ? sanitizeDataForWrite(localeValue as Record<string, unknown>, tab.fields ?? [])
+                    : localeValue,
+                ]))
+              : sanitizeDataForWrite(value as Record<string, unknown>, tab.fields ?? [])
           } else if (value === undefined) {
             const nested = sanitizeDataForWrite({}, tab.fields ?? [])
             if (Object.keys(nested).length) output[tab.name] = nested
@@ -177,6 +191,10 @@ export const sanitizeDataForWrite = (data: Record<string, unknown>, fields: Fiel
 
     if (value === undefined && field.defaultValue !== undefined) {
       value = cloneDefault(field.defaultValue)
+    }
+
+    if (value === undefined && field.type === 'select' && field.hasMany) {
+      value = []
     }
 
     if (value !== undefined) {

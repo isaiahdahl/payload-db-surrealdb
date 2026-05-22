@@ -112,6 +112,14 @@ const init: NonNullable<BaseDatabaseAdapter['init']> = async function init(this:
   const registerFieldTables = (table: string, fields: any[] = []) => {
     for (const field of fields) {
       if (field.enumName) this.enums![field.enumName] = {}
+      if (field.type === 'blocks' && field.name) {
+        this.tables![table] ??= {}
+        ;(this.tables![table] as Record<string, unknown>)[field.name] = {}
+        if (field.localized) {
+          this.tables![`${table}_locales`] ??= {}
+          ;(this.tables![`${table}_locales`] as Record<string, unknown>)[field.name] = {}
+        }
+      }
       const dbName = typeof field.dbName === 'function' ? field.dbName({ tableName: table }) : field.dbName
       if (dbName) this.tables![dbName] = {}
       if (dbName && field.localized) this.tables![`${dbName}_locales`] = {}
@@ -137,6 +145,15 @@ const init: NonNullable<BaseDatabaseAdapter['init']> = async function init(this:
     this.tables[`${table}_rels`] = {}
     if ((collection.fields ?? []).some((field: any) => field.localized)) this.tables[`${table}_locales`] = {}
     registerFieldTables(table, collection.fields)
+    for (const field of collection.fields ?? []) {
+      if ((field as any).type === 'blocks' && (field as any).name) {
+        ;(this.tables[table] as Record<string, unknown>)[(field as any).name] = {}
+        if ((field as any).localized) {
+          this.tables[`${table}_locales`] ??= {}
+          ;(this.tables[`${table}_locales`] as Record<string, unknown>)[(field as any).name] = {}
+        }
+      }
+    }
     statements.push(defineTable(table))
     statements.push(...buildIndexStatements(table, getIndexedFields(collection.fields)))
     statements.push(defineTable(versionTable))
@@ -473,6 +490,15 @@ export function surrealAdapter(args: SurrealAdapterArgs = {}): DatabaseAdapterOb
     })
 
     dbAdapter.client = createClient(dbAdapter)
+    ;(dbAdapter as any).dropDatabase = async () => {}
+    ;(dbAdapter as any).drizzle = {
+      delete: async (tableRef: unknown) => {
+        const table = tableRef === undefined
+          ? getTableName('payload_globals', dbAdapter.tablePrefix)
+          : Object.entries(dbAdapter.tables ?? {}).find(([, value]) => value === tableRef)?.[0]
+        if (table) await dbAdapter.client.query(`DELETE ${escapeIdent(table)};`)
+      },
+    }
 
     return dbAdapter
   }

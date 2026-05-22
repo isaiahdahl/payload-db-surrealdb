@@ -1,5 +1,4 @@
 import { count, create, deleteMany, find, updateOne } from './operations.js';
-import { queueTransactionStatement } from './transactions/index.js';
 import { escapeIdent, getTableName, literal } from './utilities/sql.js';
 const versionCollection = (slug) => `${slug}_versions`;
 const globalVersionCollection = (slug) => `global_${slug}_versions`;
@@ -21,6 +20,31 @@ const draftWhere = (where = {}) => {
         return [reserved.has(key) || key.startsWith('version.') ? key : `version.${key}`, value];
     }));
 };
+const getLocaleCodes = (adapter) => {
+    const localization = adapter.payload.config.localization;
+    const locales = typeof localization === 'object' && Array.isArray(localization.locales) ? localization.locales : [];
+    return new Set(locales.map((locale) => typeof locale === 'string' ? locale : locale.code).filter(Boolean));
+};
+const keepLocalesInValue = (value, allowed, localeCodes) => {
+    if (Array.isArray(value)) {
+        for (const item of value)
+            keepLocalesInValue(item, allowed, localeCodes);
+        return;
+    }
+    if (!value || typeof value !== 'object')
+        return;
+    const object = value;
+    const keys = Object.keys(object);
+    const localeKeys = keys.filter((key) => localeCodes.has(key));
+    if (localeKeys.length) {
+        for (const key of localeKeys) {
+            if (!allowed.has(key))
+                delete object[key];
+        }
+    }
+    for (const item of Object.values(object))
+        keepLocalesInValue(item, allowed, localeCodes);
+};
 const toDraftDoc = (doc) => {
     if (!doc) {
         return null;
@@ -35,6 +59,7 @@ export const createVersion = async function createVersion(args) {
     const now = new Date().toISOString();
     const version = { ...args.versionData };
     delete version.id;
+    delete version.__publishedLocales;
     const doc = await create.call(this, {
         collection: versionCollection(args.collectionSlug),
         data: {
@@ -47,13 +72,11 @@ export const createVersion = async function createVersion(args) {
             updatedAt: args.updatedAt ?? now,
             version,
         },
-        req: args.req,
+        req: undefined,
     });
     const statement = latestVersionStatement(versionCollection(args.collectionSlug), doc.id, args.parent, doc.updatedAt);
     if (statement) {
-        if (!(await queueTransactionStatement(this, args.req, statement))) {
-            await this.client.query(`${statement};`);
-        }
+        await this.client.query(`${statement};`);
     }
     return args.returning === false ? null : doc;
 };
@@ -61,6 +84,9 @@ export const createGlobalVersion = async function createGlobalVersion(args) {
     const now = new Date().toISOString();
     const version = { ...args.versionData };
     delete version.id;
+    delete version.__publishedLocales;
+    if (args.publishedLocale)
+        keepLocalesInValue(version, new Set([args.publishedLocale]), getLocaleCodes(this));
     const doc = await create.call(this, {
         collection: globalVersionCollection(args.globalSlug),
         data: {
@@ -72,12 +98,10 @@ export const createGlobalVersion = async function createGlobalVersion(args) {
             updatedAt: args.updatedAt ?? now,
             version,
         },
-        req: args.req,
+        req: undefined,
     });
     const statement = `UPDATE ${escapeIdent(getTableName(globalVersionCollection(args.globalSlug)))} SET latest = false WHERE meta::id(id) != ${literal(String(doc.id))} AND latest = true AND updatedAt < ${literal(doc.updatedAt)}`;
-    if (!(await queueTransactionStatement(this, args.req, statement))) {
-        await this.client.query(`${statement};`);
-    }
+    await this.client.query(`${statement};`);
     return args.returning === false ? null : doc;
 };
 export const findVersions = async function findVersions(args) {
@@ -95,12 +119,22 @@ export const countGlobalVersions = async function countGlobalVersions(args) {
 export const deleteVersions = async function deleteVersions(args) {
     await deleteMany.call(this, {
         collection: args.collection ? versionCollection(args.collection) : globalVersionCollection(args.globalSlug),
-        req: args.req,
+        req: undefined,
         where: args.where,
     });
 };
-export const updateVersion = async function updateVersion(args) {
-    const version = { ...args.versionData };
+const getVersionUpdateData = (versionData) => {
+    if (versionData.version && typeof versionData.version === 'object') {
+        const { createdAt, updatedAt, ...rest } = versionData;
+        if (rest.version && typeof rest.version === 'object')
+            delete rest.version.__publishedLocales;
+        return {
+            ...rest,
+            ...(createdAt !== undefined ? { createdAt } : {}),
+            ...(updatedAt !== undefined ? { updatedAt } : {}),
+        };
+    }
+    const version = { ...versionData };
     const data = { version };
     if ('createdAt' in version) {
         data.createdAt = version.createdAt;
@@ -110,31 +144,26 @@ export const updateVersion = async function updateVersion(args) {
         data.updatedAt = version.updatedAt;
         delete version.updatedAt;
     }
+    return data;
+};
+export const updateVersion = async function updateVersion(args) {
+    const data = getVersionUpdateData(args.versionData);
     const result = await updateOne.call(this, {
         collection: versionCollection(args.collection),
         data,
         id: args.id,
-        req: args.req,
+        req: undefined,
         where: args.where,
     });
     return args.returning === false ? null : result;
 };
 export const updateGlobalVersion = async function updateGlobalVersion(args) {
-    const version = { ...args.versionData };
-    const data = { version };
-    if ('createdAt' in version) {
-        data.createdAt = version.createdAt;
-        delete version.createdAt;
-    }
-    if ('updatedAt' in version) {
-        data.updatedAt = version.updatedAt;
-        delete version.updatedAt;
-    }
+    const data = getVersionUpdateData(args.versionData);
     const result = await updateOne.call(this, {
         collection: globalVersionCollection(args.global),
         data,
         id: args.id,
-        req: args.req,
+        req: undefined,
         where: args.where,
     });
     return args.returning === false ? null : result;
@@ -153,24 +182,6 @@ export const queryDrafts = async function queryDrafts(args) {
         where: { and: [{ latest: { equals: true } }, draftWhere(args.where ?? {})] },
     });
     const docs = result.docs.map((doc) => toDraftDoc(doc)).filter(Boolean);
-    if (!docs.length) {
-        const baseSort = Array.isArray(args.sort)
-            ? args.sort.map((value) => String(value).replace(/^-version\./, '-').replace(/^version\./, ''))
-            : typeof args.sort === 'string'
-                ? args.sort.replace(/^-version\./, '-').replace(/^version\./, '')
-                : args.sort;
-        return find.call(this, {
-            collection: args.collection,
-            limit: args.limit,
-            locale: args.locale,
-            page: args.page,
-            pagination: args.pagination,
-            req: args.req,
-            select: args.select,
-            sort: baseSort,
-            where: args.where,
-        });
-    }
     return {
         ...result,
         docs,

@@ -97,7 +97,7 @@ const whereUsesVirtual = (adapter: SurrealAdapter, collection: string, where: un
     const normalizedKey = key.toLowerCase()
     if ((normalizedKey === 'and' || normalizedKey === 'or') && Array.isArray(value)) return value.some((entry) => whereUsesVirtual(adapter, collection, entry))
     const usesClientOperator = value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).some((operator) => operator === 'near' || operator === 'within' || operator === 'intersects')
-    return usesClientOperator || key.includes('.') || key.includes('__') || Boolean(getVirtualAlias(adapter, collection, key)) || isLocalizedRelationshipField(adapter, collection, key) || isRelationshipPath(adapter, collection, key)
+    return usesClientOperator || Boolean(pathRootField(adapter, collection, key)?.hasMany) || key.includes('.') || key.includes('__') || Boolean(getVirtualAlias(adapter, collection, key)) || whereUsesLocalizedFields(adapter, collection, { [key]: value }) || isLocalizedRelationshipField(adapter, collection, key) || isRelationshipPath(adapter, collection, key)
   })
 }
 
@@ -109,7 +109,7 @@ const sortValues = (sort?: string | string[]): string[] => (Array.isArray(sort) 
 const sortUsesVirtual = (adapter: SurrealAdapter, collection: string, sort?: string | string[]): boolean =>
   sortValues(sort).some((value) => {
     const path = value.replace(/^-|^\+/, '')
-    return Boolean(getVirtualAlias(adapter, collection, path)) || isRelationshipPath(adapter, collection, path)
+    return Boolean(getVirtualAlias(adapter, collection, path)) || Boolean(getLocalizedFieldPath(adapter, collection, path)) || isRelationshipPath(adapter, collection, path)
   })
 
 const compareScalarValues = (a: unknown, b: unknown): number => {
@@ -256,6 +256,7 @@ const getNearConstraint = (where: unknown): { path: string; value: unknown } | n
 }
 
 const resolveLocaleValue = (value: unknown, locale?: unknown): unknown => {
+  if (Array.isArray(value)) return value.map((item) => resolveLocaleValue(item, locale))
   if (value && typeof value === 'object' && !Array.isArray(value)) {
     const object = value as Record<string, unknown>
     const localeKey = typeof locale === 'string' ? locale : 'en'
@@ -274,7 +275,7 @@ const docMatchesWhere = (adapter: SurrealAdapter, collection: string, doc: Recor
     const normalizedKey = key.toLowerCase()
     if (normalizedKey === 'and' && Array.isArray(value)) return value.every((entry) => docMatchesWhere(adapter, collection, doc, entry, locale))
     if (normalizedKey === 'or' && Array.isArray(value)) return value.some((entry) => docMatchesWhere(adapter, collection, doc, entry, locale))
-    const path = getVirtualAlias(adapter, collection, key) ?? key.replaceAll('__', '.')
+    const path = getVirtualAlias(adapter, collection, key) ?? getLocalizedFieldPath(adapter, collection, key, locale) ?? key.replaceAll('__', '.')
     const actual = resolveLocaleValue(getValueAtPath(doc, path), locale)
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       return Object.entries(value as Record<string, unknown>).every(([operator, expected]) => matchesOperator(actual, operator, expected))
@@ -294,7 +295,7 @@ const getSortSQL = (sort?: string | string[]): string => {
     const direction = sortValue.startsWith('-') || (index > 0 && !sortValue.startsWith('+')) ? 'DESC' : 'ASC'
     const field = sortValue.replace(/^-|^\+/, '')
 
-    return `${pathToSQL(field)} ${direction}`
+    return `${field === 'id' ? 'id' : pathToSQL(field)} ${direction}`
   })
 
   return `ORDER BY ${parts.join(', ')}`
@@ -345,14 +346,84 @@ const getFieldStorageName = (field: any): string | undefined => {
   return typeof field.dbName === 'function' ? field.dbName({ tableName: '' }) : (field.dbName ?? field.name)
 }
 
-const collapseLocalizedValues = (value: Record<string, unknown>, fields: any[] = []): Record<string, unknown> => {
+const findFieldByName = (fields: any[] = [], name: string): any => {
+  for (const field of fields) {
+    if (field.name === name) return field
+    if (!field.name && field.fields?.length) {
+      const nested = findFieldByName(field.fields, name)
+      if (nested) return nested
+    }
+  }
+
+  return fields.flatMap((candidate: any) => candidate.type === 'tabs' ? candidate.tabs ?? [] : []).find((candidate: any) => candidate.name === name)
+}
+
+const getLocalizedFieldPath = (adapter: SurrealAdapter, collection: string, path: string, locale?: unknown): string | null => {
+  if (locale === 'all') return null
+  const localeKey = typeof locale === 'string' ? locale : 'en'
+  const parts = path.replaceAll('__', '.').split('.').filter(Boolean)
+  const baseCollection = getVersionBaseCollection(adapter, collection)
+
+  if (parts[0] === 'version') {
+    const versionPath = baseCollection ? getLocalizedFieldPath(adapter, baseCollection, parts.slice(1).join('.'), locale) : null
+    return versionPath ? ['version', versionPath].join('.') : null
+  }
+
+  if (baseCollection) {
+    const versionPath = getLocalizedFieldPath(adapter, baseCollection, path, locale)
+    return versionPath ? ['version', versionPath].join('.') : null
+  }
+
+  let fields = getCollectionConfig(adapter, collection)?.fields ?? []
+  const output: string[] = []
+
+  for (const [index, part] of parts.entries()) {
+    const field = findFieldByName(fields, part)
+    output.push(part)
+
+    if (!field) return null
+
+    if (field.localized) {
+      output.push(localeKey)
+      output.push(...parts.slice(index + 1))
+      return output.join('.')
+    }
+
+    if (field.type === 'tabs') fields = (field.tabs ?? []).flatMap((tab: any) => tab.fields ?? [])
+    else if (field.type === 'group' && !field.name) fields = field.fields ?? []
+    else if (field.type === 'array') fields = field.fields ?? []
+    else if (field.type === 'blocks') fields = (field.blocks ?? []).flatMap((block: any) => block.fields ?? [])
+    else fields = field.fields ?? []
+  }
+
+  return null
+}
+
+const pathRootField = (adapter: SurrealAdapter, collection: string, path: string): any => {
+  const root = path.replaceAll('__', '.').split('.')[0]
+  return getCollectionConfig(adapter, collection)?.fields?.find((item: { name?: string }) => item.name === root)
+}
+
+const whereUsesLocalizedFields = (adapter: SurrealAdapter, collection: string, where: unknown): boolean => {
+  if (!where || typeof where !== 'object' || Array.isArray(where)) return false
+  return Object.entries(where as Record<string, unknown>).some(([key, value]) => {
+    const normalizedKey = key.toLowerCase()
+    if ((normalizedKey === 'and' || normalizedKey === 'or') && Array.isArray(value)) return value.some((entry) => whereUsesLocalizedFields(adapter, collection, entry))
+    return Boolean(getLocalizedFieldPath(adapter, collection, key))
+  })
+}
+
+const sortUsesLocalizedFields = (adapter: SurrealAdapter, collection: string, sort?: string | string[]): boolean =>
+  sortValues(sort).some((value) => Boolean(getLocalizedFieldPath(adapter, collection, value.replace(/^-|^\+/, ''))))
+
+const collapseLocalizedValues = (value: Record<string, unknown>, fields: any[] = [], locale?: unknown): Record<string, unknown> => {
   for (const field of fields) {
     if (!field.name) {
       if (Array.isArray(field.fields)) {
-        collapseLocalizedValues(value, field.fields)
+        collapseLocalizedValues(value, field.fields, locale)
       }
       if (Array.isArray(field.tabs)) {
-        for (const tab of field.tabs) collapseLocalizedValues(value, tab.fields ?? [])
+        for (const tab of field.tabs) collapseLocalizedValues(value, tab.fields ?? [], locale)
       }
       continue
     }
@@ -365,9 +436,11 @@ const collapseLocalizedValues = (value: Record<string, unknown>, fields: any[] =
       delete value[storageName]
     }
 
-    if (field.localized && value[field.name] && typeof value[field.name] === 'object' && !Array.isArray(value[field.name])) {
+    if (field.localized && locale !== 'all' && value[field.name] && typeof value[field.name] === 'object' && !Array.isArray(value[field.name])) {
       const localized = value[field.name] as Record<string, unknown>
-      if ('en' in localized) value[field.name] = localized.en
+      const localeKey = typeof locale === 'string' ? locale : 'en'
+      if (localeKey in localized) value[field.name] = localized[localeKey]
+      else if ('en' in localized) value[field.name] = localized.en
     }
 
     if (Array.isArray(value[field.name])) {
@@ -375,10 +448,10 @@ const collapseLocalizedValues = (value: Record<string, unknown>, fields: any[] =
         if (!row || typeof row !== 'object' || Array.isArray(row)) return row
         const nested = row as Record<string, unknown>
         const block = field.type === 'blocks' ? (field.blocks ?? []).find((candidate: any) => candidate.slug === nested.blockType) : undefined
-        return collapseLocalizedValues(nested, block?.fields ?? field.fields ?? [])
+        return collapseLocalizedValues(nested, block?.fields ?? field.fields ?? [], locale)
       })
     } else if (value[field.name] && typeof value[field.name] === 'object' && !Array.isArray(value[field.name])) {
-      value[field.name] = collapseLocalizedValues(value[field.name] as Record<string, unknown>, field.fields ?? [])
+      value[field.name] = collapseLocalizedValues(value[field.name] as Record<string, unknown>, field.fields ?? [], locale)
     }
   }
   return value
@@ -405,7 +478,55 @@ const collapseEnglishLocaleObjects = (value: unknown): unknown => {
   return value
 }
 
-const applyReadTransforms = (adapter: SurrealAdapter, collection: string, docs: Record<string, unknown>[]): Record<string, unknown>[] => {
+const pruneLocalesExcept = (doc: Record<string, unknown>, fields: any[] = [], locales?: Set<string>): void => {
+  if (!locales) return
+
+  for (const field of fields) {
+    if (field.type === 'tabs') {
+      for (const tab of field.tabs ?? []) pruneLocalesExcept(tab.name && doc[tab.name] && typeof doc[tab.name] === 'object' ? doc[tab.name] as Record<string, unknown> : doc, tab.fields ?? [], locales)
+      continue
+    }
+
+    if (!field.name) {
+      pruneLocalesExcept(doc, field.fields ?? [], locales)
+      continue
+    }
+
+    const value = doc[field.name]
+
+    if (field.localized && value && typeof value === 'object' && !Array.isArray(value)) {
+      for (const locale of Object.keys(value as Record<string, unknown>)) {
+        if (!locales.has(locale)) delete (value as Record<string, unknown>)[locale]
+      }
+    }
+  }
+}
+
+const pruneUnpublishedLocales = (doc: Record<string, unknown>, fields: any[] = [], statuses?: Record<string, unknown>): void => {
+  if (!statuses) return
+
+  for (const field of fields) {
+    if (field.type === 'tabs') {
+      for (const tab of field.tabs ?? []) pruneUnpublishedLocales(tab.name && doc[tab.name] && typeof doc[tab.name] === 'object' ? doc[tab.name] as Record<string, unknown> : doc, tab.fields ?? [], statuses)
+      continue
+    }
+
+    if (!field.name) {
+      pruneUnpublishedLocales(doc, field.fields ?? [], statuses)
+      continue
+    }
+
+    const value = doc[field.name]
+
+    if (field.localized && value && typeof value === 'object' && !Array.isArray(value)) {
+      for (const locale of Object.keys(value as Record<string, unknown>)) {
+        if (statuses[locale] !== 'published') delete (value as Record<string, unknown>)[locale]
+      }
+    }
+  }
+}
+
+const applyReadTransforms = (adapter: SurrealAdapter, collection: string, docs: Record<string, unknown>[], locale?: unknown, shouldPrunePublishedLocales = true): Record<string, unknown>[] => {
   const fields = getCollectionConfig(adapter, collection)?.fields ?? []
   const idField = fields.find((field: { name?: string }) => field.name === 'id') as { type?: string } | undefined
   const collectionConfig = getCollectionConfig(adapter, collection) as { customIDType?: string } | undefined
@@ -414,8 +535,22 @@ const applyReadTransforms = (adapter: SurrealAdapter, collection: string, docs: 
     ? docs.map((doc) => ({ ...doc, id: typeof doc.id === 'string' && !Number.isNaN(Number(doc.id)) ? Number(doc.id) : doc.id }))
     : docs
 
-  if (collection !== 'custom-schema') return normalized
-  return normalized.map((doc) => collapseEnglishLocaleObjects(collapseLocalizedValues(doc, fields)) as Record<string, unknown>)
+  if (collection !== 'custom-schema') {
+    if (locale === 'all' && shouldPrunePublishedLocales) {
+      for (const doc of normalized as Record<string, unknown>[]) {
+        const publishedLocales = Array.isArray(doc.__publishedLocales) ? new Set((doc.__publishedLocales as unknown[]).map(String)) : null
+        if (publishedLocales) pruneLocalesExcept(doc, fields, publishedLocales)
+        delete doc.__publishedLocales
+        const status = doc._status
+        if (status && typeof status === 'object' && !Array.isArray(status) && Object.values(status as Record<string, unknown>).some((value) => value === 'published')) {
+          pruneUnpublishedLocales(doc, fields, status as Record<string, unknown>)
+        }
+      }
+    }
+
+    return normalized
+  }
+  return normalized.map((doc) => collapseEnglishLocaleObjects(collapseLocalizedValues(doc, fields, locale)) as Record<string, unknown>)
 }
 
 const getDepth = (args: Record<string, unknown>): number => typeof args.depth === 'number' ? args.depth : 0
@@ -493,21 +628,45 @@ const setAtomicValueAtPath = (doc: Record<string, unknown>, path: string, value:
   }
 }
 
+const collectUniqueFieldIndexes = (fields: any[] = [], prefix = ''): Array<{ fields: string[]; unique: true }> => fields.flatMap((field) => {
+  if (field.type === 'tabs') {
+    return (field.tabs ?? []).flatMap((tab: any) => collectUniqueFieldIndexes(tab.fields ?? [], tab.name ? `${prefix}${tab.name}.` : prefix))
+  }
+
+  if (!field.name) return []
+
+  const path = `${prefix}${field.name}`
+  const indexes = field.unique ? [{ fields: [path], unique: true as const }] : []
+
+  if (field.fields?.length) indexes.push(...collectUniqueFieldIndexes(field.fields, `${path}.`))
+  return indexes
+})
+
 const validateUniqueIndexes = async (adapter: SurrealAdapter, collection: string, data: Record<string, unknown>, id?: unknown): Promise<void> => {
   const config = getCollectionConfig(adapter, collection) as { fields?: Array<{ name?: string; unique?: boolean }>; indexes?: Array<{ fields?: string[]; unique?: boolean }> } | undefined
   const table = escapeIdent(getTableName(collection, adapter.tablePrefix))
   const uniqueIndexes = [
-    ...(config?.fields ?? []).filter((field) => field.unique && field.name).map((field) => ({ fields: [field.name!], unique: true })),
+    ...collectUniqueFieldIndexes(config?.fields ?? []),
     ...(config?.indexes ?? []),
     ...(collection === 'places' ? [{ fields: ['city', 'country'], unique: true }] : []),
   ]
 
   for (const index of uniqueIndexes) {
     if (!index.unique || !index.fields?.length) continue
-    const clauses = index.fields.map((field) => `${pathToSQL(field)} = ${literal(getValueAtPath(data, field))}`)
-    if (clauses.some((clause) => clause.endsWith('NONE'))) continue
-    if (id !== undefined) clauses.push(`meta::id(id) != ${literal(String(id))}`)
-    const existing = await adapter.client.query<Record<string, unknown>[]>(`SELECT id FROM ${table} WHERE ${clauses.join(' AND ')} LIMIT 1;`)
+    const clauses = index.fields.map((field) => {
+      const value = getValueAtPath(data, field)
+      if (value && typeof value === 'object' && !Array.isArray(value)) {
+        const localeClauses = Object.entries(value as Record<string, unknown>)
+          .filter(([, localeValue]) => localeValue !== undefined && localeValue !== null)
+          .map(([locale, localeValue]) => `${pathToSQL(`${field}.${locale}`)} = ${literal(localeValue)}`)
+        return localeClauses.length ? `(${localeClauses.join(' OR ')})` : null
+      }
+      return value === undefined || value === null ? null : `${pathToSQL(field)} = ${literal(value)}`
+    }).filter(Boolean) as string[]
+    if (clauses.length !== index.fields.length) continue
+    const whereParts = [`(${clauses.join(' AND ')})`]
+    if (id !== undefined) whereParts.push(`meta::id(id) != ${literal(String(id))}`)
+    const existing = await adapter.client.query<Record<string, unknown>[]>(`SELECT id FROM ${table} WHERE ${whereParts.join(' AND ')} LIMIT 1;`)
     if (existing.length) {
       throw new ValidationError({ collection, errors: [{ message: 'Value must be unique', path: index.fields[0]! }] })
     }
@@ -580,6 +739,92 @@ const refreshNestedRowIDs = (value: Record<string, unknown>, fields: any[] = [])
   }
 
   return value
+}
+
+const collectLocalizedLocales = (doc: Record<string, unknown>, fields: any[] = []): Set<string> => {
+  const locales = new Set<string>()
+
+  for (const field of fields) {
+    if (field.type === 'tabs') {
+      for (const tab of field.tabs ?? []) {
+        const target = tab.name && doc[tab.name] && typeof doc[tab.name] === 'object' ? doc[tab.name] as Record<string, unknown> : doc
+        for (const locale of collectLocalizedLocales(target, tab.fields ?? [])) locales.add(locale)
+      }
+      continue
+    }
+
+    if (!field.name) {
+      for (const locale of collectLocalizedLocales(doc, field.fields ?? [])) locales.add(locale)
+      continue
+    }
+
+    const value = doc[field.name]
+    if (field.localized && value && typeof value === 'object' && !Array.isArray(value)) {
+      for (const locale of Object.keys(value as Record<string, unknown>)) locales.add(locale)
+    }
+  }
+
+  return locales
+}
+
+const keepOnlyLocales = (doc: Record<string, unknown>, fields: any[] = [], locales: Set<string>): void => {
+  for (const field of fields) {
+    if (field.type === 'tabs') {
+      for (const tab of field.tabs ?? []) keepOnlyLocales(tab.name && doc[tab.name] && typeof doc[tab.name] === 'object' ? doc[tab.name] as Record<string, unknown> : doc, tab.fields ?? [], locales)
+      continue
+    }
+
+    if (!field.name) {
+      keepOnlyLocales(doc, field.fields ?? [], locales)
+      continue
+    }
+
+    const value = doc[field.name]
+
+    if (field.localized && value && typeof value === 'object' && !Array.isArray(value)) {
+      for (const key of Object.keys(value as Record<string, unknown>)) {
+        if (!locales.has(key)) delete (value as Record<string, unknown>)[key]
+      }
+    }
+  }
+}
+
+const hasMeaningfulPublishFieldData = (data: Record<string, unknown>): boolean => Object.entries(data).some(([key, value]) => {
+  if (['_status', 'createdAt', 'updatedAt'].includes(key)) return false
+  if (Array.isArray(value) && value.length === 0) return false
+  if (value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).length === 0) return false
+  return true
+})
+
+const shouldReplacePublishedLocale = (args: Record<string, unknown>, data: Record<string, unknown>): string | null => {
+  const locale = args.locale
+  return hasMeaningfulPublishFieldData(data) && data._status === 'published' && typeof locale === 'string' && locale !== 'all' ? locale : null
+}
+
+const isRepublishingExistingLocaleOnly = (existing: Record<string, unknown>, data: Record<string, unknown>, fields: any[] = [], locale: string): boolean => {
+  if (!Array.isArray(existing.__publishedLocales) || !(existing.__publishedLocales as unknown[]).map(String).includes(locale)) return false
+
+  for (const field of fields) {
+    if (field.type === 'tabs') {
+      const targetExisting = field.name && existing[field.name] && typeof existing[field.name] === 'object' ? existing[field.name] as Record<string, unknown> : existing
+      const targetData = field.name && data[field.name] && typeof data[field.name] === 'object' ? data[field.name] as Record<string, unknown> : data
+      if (!isRepublishingExistingLocaleOnly(targetExisting, targetData, field.fields ?? [], locale)) return false
+      continue
+    }
+
+    if (!field.name) {
+      if (!isRepublishingExistingLocaleOnly(existing, data, field.fields ?? [], locale)) return false
+      continue
+    }
+
+    const value = data[field.name]
+    if (field.localized && value && typeof value === 'object' && !Array.isArray(value) && locale in (value as Record<string, unknown>)) {
+      const existingValue = existing[field.name] && typeof existing[field.name] === 'object' ? (existing[field.name] as Record<string, unknown>)[locale] : undefined
+      if (!valuesEqual(existingValue, (value as Record<string, unknown>)[locale])) return false
+    }
+  }
+
+  return true
 }
 
 const removeDottedOperatorKeys = (data: Record<string, unknown>): Record<string, unknown> => {
@@ -688,13 +933,13 @@ export const create: Create = async function create(this: SurrealAdapter, args) 
   if (await queueTransactionStatement(this, args.req, statement)) {
     const doc = normalizeDocument({ ...data, id: resolvedID }) as Record<string, unknown>
     await addTransactionDoc(this, args.req, args.collection, doc)
-    const docs = applyReadTransforms(this, args.collection, [applySelect(doc, args.select) as Record<string, unknown>])
+    const docs = applyReadTransforms(this, args.collection, [applySelect(doc, args.select) as Record<string, unknown>], args.locale)
     return shouldReturn ? docs[0] ?? null : null
   }
 
   try {
     const result = await this.client.query<Record<string, unknown>[]>(statement)
-    const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select) as Record<string, unknown>[])
+    const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select) as Record<string, unknown>[], args.locale, !(args as Record<string, unknown>).draftsEnabled)
     if (docs[0] && id !== undefined) {
       const idField = collectionConfig?.fields?.find((field: { name?: string }) => field.name === 'id') as { type?: string } | undefined
       const customIDType = (this.payload as any)?.collections?.[args.collection]?.customIDType ?? (collectionConfig as { customIDType?: string } | undefined)?.customIDType
@@ -719,7 +964,7 @@ export const findOne: FindOne = (async function findOne(this: SurrealAdapter, ar
 
   try {
     const result = await this.client.query<Record<string, unknown>[]>(`SELECT * FROM ${table} ${where} LIMIT 1;`)
-    const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select) as Record<string, unknown>[])
+    const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select) as Record<string, unknown>[], args.locale, !(args as Record<string, unknown>).draftsEnabled)
     const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never))
 
     return populated[0] ?? null
@@ -758,7 +1003,7 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
 
   const needsClientVirtualHandling = useClientVirtuals || useClientSort
   const transactionDocs = await getTransactionDocs(this, args.req, args.collection)
-  const baseDocs = applyReadTransforms(this, args.collection, [...normalizeDocs(docs, needsClientVirtualHandling ? undefined : args.select) as Record<string, unknown>[], ...transactionDocs])
+  const baseDocs = applyReadTransforms(this, args.collection, [...normalizeDocs(docs, needsClientVirtualHandling ? undefined : args.select) as Record<string, unknown>[], ...transactionDocs], needsClientVirtualHandling ? 'all' : args.locale, !(args as Record<string, unknown>).draftsEnabled)
   let normalized = needsClientVirtualHandling
     ? baseDocs
     : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args as never))
@@ -782,7 +1027,7 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
       for (const sortValue of sortValues(args.sort)) {
         const direction = sortValue.startsWith('-') ? -1 : 1
         const field = sortValue.replace(/^-|^\+/, '')
-        const path = getVirtualAlias(this, args.collection, field) ?? field.replaceAll('__', '.')
+        const path = getVirtualAlias(this, args.collection, field) ?? getLocalizedFieldPath(this, args.collection, field, args.locale) ?? field.replaceAll('__', '.')
         const result = compareValues(resolveLocaleValue(getValueAtPath(workingDocs[a], path), args.locale), resolveLocaleValue(getValueAtPath(workingDocs[b], path), args.locale))
 
         if (result !== 0) return direction * result
@@ -792,7 +1037,7 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
     })
   }
 
-  const total = needsClientVirtualHandling ? workingIndexes.length : (await count.call(this, { collection: args.collection, req: args.req, where: args.where })).totalDocs
+  const total = needsClientVirtualHandling ? workingIndexes.length : (await count.call(this, { collection: args.collection, locale: args.locale, req: args.req, where: args.where })).totalDocs
   const totalPages = limit > 0 ? Math.ceil(total / limit) : 1
   const pageIndexes = needsClientVirtualHandling ? (limit > 0 ? workingIndexes.slice(start, start + limit) : workingIndexes) : []
   const pageDocs = needsClientVirtualHandling ? pageIndexes.map((index) => normalized[index]) : normalized
@@ -814,7 +1059,7 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
 
 export const count: Count = async function count(this: SurrealAdapter, args) {
   if (whereUsesVirtual(this, args.collection, args.where)) {
-    const result = await find.call(this, { collection: args.collection, limit: 0, req: args.req, where: args.where })
+    const result = await find.call(this, { collection: args.collection, limit: 0, locale: args.locale, req: args.req, where: args.where })
     return { totalDocs: result.totalDocs }
   }
 
@@ -878,7 +1123,7 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
 
       try {
         const result = await this.client.query<Record<string, unknown>[]>(statement)
-        const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select) as Record<string, unknown>[])
+        const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select) as Record<string, unknown>[], args.locale)
         const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never))
 
         return shouldReturn ? populated[0] ?? null : null
@@ -890,19 +1135,29 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
     const existing = await this.client.query<Record<string, unknown>[]>(`SELECT * FROM ${getRecordID(table, args.id)};`)
     const existingDoc = normalizeDocument(existing[0]) ?? { id: args.id }
     data = removeDottedOperatorKeys(applyAtomicUpdate(data, existingDoc))
-    await validateUniqueIndexes(this, args.collection, { ...existingDoc, ...data }, args.id)
+    await validateUniqueIndexes(this, args.collection, data, args.id)
 
-    const updateContent = Object.keys(dottedData).length ? { ...existingDoc, ...data, id: args.id } : data
-    const statement = `UPDATE ${getRecordID(table, args.id)} ${Object.keys(dottedData).length ? 'CONTENT' : 'MERGE'} ${literal(updateContent)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
+    let publishedLocale = shouldReplacePublishedLocale(args as Record<string, unknown>, data)
+    if (publishedLocale && isRepublishingExistingLocaleOnly(existingDoc, data, collectionConfig?.fields, publishedLocale)) publishedLocale = null
+    if (publishedLocale) {
+      const locales = Array.isArray(existingDoc.__publishedLocales) ? new Set((existingDoc.__publishedLocales as unknown[]).map(String)) : new Set<string>()
+      locales.add(publishedLocale)
+      data.__publishedLocales = [...locales]
+    } else if (data._status === 'published') {
+      data.__publishedLocales = null
+    }
+    const shouldUseContent = Object.keys(dottedData).length > 0
+    const updateContent = shouldUseContent ? { ...existingDoc, ...data, id: args.id } : data
+    const statement = `UPDATE ${getRecordID(table, args.id)} ${shouldUseContent ? 'CONTENT' : 'MERGE'} ${literal(updateContent)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
 
     if (await queueTransactionStatement(this, args.req, statement)) {
-      const docs = applyReadTransforms(this, args.collection, [applySelect(normalizeDocument({ ...existingDoc, ...data, id: args.id }), args.select) as Record<string, unknown>])
+      const docs = applyReadTransforms(this, args.collection, [applySelect(normalizeDocument({ ...existingDoc, ...data, id: args.id }), args.select) as Record<string, unknown>], args.locale)
       return shouldReturn ? docs[0] ?? null : null
     }
 
     try {
       const result = await this.client.query<Record<string, unknown>[]>(statement)
-      const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select) as Record<string, unknown>[])
+      const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select) as Record<string, unknown>[], args.locale)
       const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never))
 
       return shouldReturn ? populated[0] ?? null : null
@@ -918,19 +1173,30 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
   }
 
   data = removeDottedOperatorKeys(applyAtomicUpdate(data, found))
-  await validateUniqueIndexes(this, args.collection, { ...found, ...data }, found.id)
+  await validateUniqueIndexes(this, args.collection, data, found.id)
 
-  const updateContent = Object.keys(dottedData).length ? { ...found, ...data } : data
-  const statement = `UPDATE ${getRecordID(table, found.id)} ${Object.keys(dottedData).length ? 'CONTENT' : 'MERGE'} ${literal(updateContent)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
+  let publishedLocale = shouldReplacePublishedLocale(args as Record<string, unknown>, data)
+  if (publishedLocale && isRepublishingExistingLocaleOnly(found as Record<string, unknown>, data, collectionConfig?.fields, publishedLocale)) publishedLocale = null
+  if (publishedLocale) {
+    const foundDoc = found as Record<string, unknown>
+    const locales = Array.isArray(foundDoc.__publishedLocales) ? new Set((foundDoc.__publishedLocales as unknown[]).map(String)) : new Set<string>()
+    locales.add(publishedLocale)
+    data.__publishedLocales = [...locales]
+  } else if (data._status === 'published') {
+    data.__publishedLocales = null
+  }
+  const shouldUseContent = Object.keys(dottedData).length > 0
+  const updateContent = shouldUseContent ? { ...found, ...data } : data
+  const statement = `UPDATE ${getRecordID(table, found.id)} ${shouldUseContent ? 'CONTENT' : 'MERGE'} ${literal(updateContent)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
 
   if (await queueTransactionStatement(this, args.req, statement)) {
-    const docs = applyReadTransforms(this, args.collection, [applySelect(normalizeDocument({ ...found, ...data }), args.select) as Record<string, unknown>])
+    const docs = applyReadTransforms(this, args.collection, [applySelect(normalizeDocument({ ...found, ...data }), args.select) as Record<string, unknown>], args.locale)
     return shouldReturn ? docs[0] ?? null : null
   }
 
   try {
     const result = await this.client.query<Record<string, unknown>[]>(statement)
-    const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select) as Record<string, unknown>[])
+    const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select) as Record<string, unknown>[], args.locale)
     const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never))
 
     return shouldReturn ? populated[0] ?? null : null

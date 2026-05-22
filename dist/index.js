@@ -43,6 +43,14 @@ const init = async function init() {
         for (const field of fields) {
             if (field.enumName)
                 this.enums[field.enumName] = {};
+            if (field.type === 'blocks' && field.name) {
+                this.tables[table] ??= {};
+                this.tables[table][field.name] = {};
+                if (field.localized) {
+                    this.tables[`${table}_locales`] ??= {};
+                    this.tables[`${table}_locales`][field.name] = {};
+                }
+            }
             const dbName = typeof field.dbName === 'function' ? field.dbName({ tableName: table }) : field.dbName;
             if (dbName)
                 this.tables[dbName] = {};
@@ -72,6 +80,16 @@ const init = async function init() {
         if ((collection.fields ?? []).some((field) => field.localized))
             this.tables[`${table}_locales`] = {};
         registerFieldTables(table, collection.fields);
+        for (const field of collection.fields ?? []) {
+            if (field.type === 'blocks' && field.name) {
+                ;
+                this.tables[table][field.name] = {};
+                if (field.localized) {
+                    this.tables[`${table}_locales`] ??= {};
+                    this.tables[`${table}_locales`][field.name] = {};
+                }
+            }
+        }
         statements.push(defineTable(table));
         statements.push(...buildIndexStatements(table, getIndexedFields(collection.fields)));
         statements.push(defineTable(versionTable));
@@ -365,6 +383,16 @@ export function surrealAdapter(args = {}) {
             upsert,
         });
         dbAdapter.client = createClient(dbAdapter);
+        dbAdapter.dropDatabase = async () => { };
+        dbAdapter.drizzle = {
+            delete: async (tableRef) => {
+                const table = tableRef === undefined
+                    ? getTableName('payload_globals', dbAdapter.tablePrefix)
+                    : Object.entries(dbAdapter.tables ?? {}).find(([, value]) => value === tableRef)?.[0];
+                if (table)
+                    await dbAdapter.client.query(`DELETE ${escapeIdent(table)};`);
+            },
+        };
         return dbAdapter;
     }
     return {

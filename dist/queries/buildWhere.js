@@ -47,9 +47,9 @@ const operatorToSQL = (field, operator, value, fields) => {
             case 'not_contains':
                 return `!(${path} CONTAINS ${valueToSQL(normalizedValue)})`;
             case 'in':
-                return `array::len(array::intersect(${path}, ${valueToSQL(Array.isArray(normalizedValue) ? normalizedValue : [normalizedValue])})) > 0`;
+                return `array::len(array::intersect(${path} ?? [], ${valueToSQL(Array.isArray(normalizedValue) ? normalizedValue : [normalizedValue])})) > 0`;
             case 'not_in':
-                return `array::len(array::intersect(${path}, ${valueToSQL(Array.isArray(normalizedValue) ? normalizedValue : [normalizedValue])})) = 0`;
+                return `array::len(array::intersect(${path} ?? [], ${valueToSQL(Array.isArray(normalizedValue) ? normalizedValue : [normalizedValue])})) = 0`;
         }
     }
     switch (operator) {

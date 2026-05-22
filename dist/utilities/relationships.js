@@ -84,7 +84,15 @@ export const transformRelationshipWrites = (data, fields = []) => {
             for (const tab of field.tabs ?? []) {
                 if (tab.name) {
                     if (isPlainObject(data[tab.name])) {
-                        transformRelationshipWrites(data[tab.name], tab.fields ?? []);
+                        if (tab.localized) {
+                            for (const localeValue of Object.values(data[tab.name])) {
+                                if (isPlainObject(localeValue))
+                                    transformRelationshipWrites(localeValue, tab.fields ?? []);
+                            }
+                        }
+                        else {
+                            transformRelationshipWrites(data[tab.name], tab.fields ?? []);
+                        }
                     }
                 }
                 else {

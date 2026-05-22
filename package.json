@@ -1,6 +1,6 @@
 {
   "name": "payload-db-surrealdb",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Alpha Payload CMS database adapter for SurrealDB.",
   "type": "module",
   "main": "dist/index.js",
