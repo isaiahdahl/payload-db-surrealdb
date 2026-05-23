@@ -307,12 +307,16 @@ const getSortSQL = (sort?: string | string[]): string => {
     return 'ORDER BY createdAt DESC'
   }
 
-  const parts = values.map((sortValue, index) => {
-    const direction = sortValue.startsWith('-') || (index > 0 && !sortValue.startsWith('+')) ? 'DESC' : 'ASC'
+  const parts = values.map((sortValue) => {
+    const direction = sortValue.startsWith('-') ? 'DESC' : 'ASC'
     const field = sortValue.replace(/^-|^\+/, '')
 
     return `${field === 'id' ? 'id' : pathToSQL(field)} ${direction}`
   })
+
+  if (!values.some((value) => value.replace(/^-|^\+/, '') === 'createdAt')) {
+    parts.push('createdAt DESC')
+  }
 
   return `ORDER BY ${parts.join(', ')}`
 }
@@ -574,7 +578,13 @@ const applyReadTransforms = (adapter: SurrealAdapter, collection: string, docs: 
   return normalized.map((doc) => collapseEnglishLocaleObjects(collapseLocalizedValues(doc, fields, locale)) as Record<string, unknown>)
 }
 
-const getDepth = (args: Record<string, unknown>): number => typeof args.depth === 'number' ? args.depth : 0
+const getDepth = (args: Record<string, unknown>): number => {
+  if (typeof args.depth === 'number') {
+    if (args.depth === 0 && (args.req as any)?.payloadAPI === 'GraphQL' && args.select) return 1
+    return args.depth
+  }
+  return 0
+}
 
 const valuesEqual = (a: unknown, b: unknown): boolean => JSON.stringify(normalizeComparableValue(a)) === JSON.stringify(normalizeComparableValue(b))
 
@@ -954,13 +964,13 @@ export const create: Create = async function create(this: SurrealAdapter, args) 
   if (await queueTransactionStatement(this, args.req, statement)) {
     const doc = normalizeDocument({ ...data, id: resolvedID }) as Record<string, unknown>
     await addTransactionDoc(this, args.req, args.collection, doc)
-    const docs = applyReadTransforms(this, args.collection, [applySelect(doc, args.select) as Record<string, unknown>], args.locale)
-    return shouldReturn ? docs[0] ?? null : null
+    const docs = applyReadTransforms(this, args.collection, [doc], args.locale)
+    return shouldReturn ? applySelect(docs[0] ?? null, args.select) : null
   }
 
   try {
     const result = await this.client.query<Record<string, unknown>[]>(statement)
-    const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select) as Record<string, unknown>[], args.locale, !(args as Record<string, unknown>).draftsEnabled)
+    const docs = applyReadTransforms(this, args.collection, normalizeDocs(result) as Record<string, unknown>[], args.locale, !(args as Record<string, unknown>).draftsEnabled)
     if (docs[0] && id !== undefined) {
       const idField = collectionConfig?.fields?.find((field: { name?: string }) => field.name === 'id') as { type?: string } | undefined
       const customIDType = (this.payload as any)?.collections?.[args.collection]?.customIDType ?? (collectionConfig as { customIDType?: string } | undefined)?.customIDType
@@ -968,7 +978,7 @@ export const create: Create = async function create(this: SurrealAdapter, args) 
     }
     const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
 
-    return shouldReturn ? populated[0] ?? null : null
+    return shouldReturn ? applySelect(populated[0] ?? null, args.select) : null
   } catch (error) {
     mapWriteError(this, args.collection, error)
   }
@@ -985,10 +995,10 @@ export const findOne: FindOne = (async function findOne(this: SurrealAdapter, ar
 
   try {
     const result = await this.client.query<Record<string, unknown>[]>(`SELECT * FROM ${table} ${where} LIMIT 1;`)
-    const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select) as Record<string, unknown>[], args.locale, !(args as Record<string, unknown>).draftsEnabled)
+    const docs = applyReadTransforms(this, args.collection, normalizeDocs(result) as Record<string, unknown>[], args.locale, !(args as Record<string, unknown>).draftsEnabled)
     const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
 
-    return populated[0] ?? null
+    return applySelect(populated[0] ?? null, args.select)
   } catch (error) {
     if (isMissingTableError(error)) {
       return null
@@ -1006,9 +1016,11 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
   const start = pagination.start
   const currentPage = pagination.currentPage
   const useClientVirtuals = whereUsesVirtual(this, args.collection, args.where)
-  const useClientSort = sortUsesVirtual(this, args.collection, args.sort)
+  const collectionConfig = getCollectionConfig(this, args.collection) as { defaultSort?: string | string[]; orderable?: boolean } | undefined
+  const effectiveSort = args.sort ?? collectionConfig?.defaultSort ?? (collectionConfig?.orderable ? '_order' : undefined)
+  const useClientSort = sortUsesVirtual(this, args.collection, effectiveSort)
   const where = useClientVirtuals ? '' : buildRelationshipAwareWhere(this, args.collection, args.where)
-  const sort = useClientSort ? '' : getSortSQL(args.sort)
+  const sort = useClientSort ? '' : getSortSQL(effectiveSort)
   const limitSQL = limit > 0 && !useClientVirtuals && !useClientSort ? `LIMIT ${limit} START ${start}` : ''
   let docs: Record<string, unknown>[] = []
 
@@ -1024,7 +1036,7 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
 
   const needsClientVirtualHandling = useClientVirtuals || useClientSort
   const transactionDocs = await getTransactionDocs(this, args.req, args.collection)
-  const baseDocs = applyReadTransforms(this, args.collection, [...normalizeDocs(docs, needsClientVirtualHandling ? undefined : args.select) as Record<string, unknown>[], ...transactionDocs], needsClientVirtualHandling ? 'all' : args.locale, !(args as Record<string, unknown>).draftsEnabled)
+  const baseDocs = applyReadTransforms(this, args.collection, [...normalizeDocs(docs) as Record<string, unknown>[], ...transactionDocs], needsClientVirtualHandling ? 'all' : args.locale, !(args as Record<string, unknown>).draftsEnabled)
   let normalized = needsClientVirtualHandling
     ? baseDocs
     : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
@@ -1045,7 +1057,7 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
 
   if (useClientSort) {
     workingIndexes.sort((a, b) => {
-      for (const sortValue of sortValues(args.sort)) {
+      for (const sortValue of sortValues(effectiveSort)) {
         const direction = sortValue.startsWith('-') ? -1 : 1
         const field = sortValue.replace(/^-|^\+/, '')
         const path = getVirtualAlias(this, args.collection, field) ?? getLocalizedFieldPath(this, args.collection, field, args.locale) ?? field.replaceAll('__', '.')
@@ -1062,7 +1074,7 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
   const totalPages = limit > 0 ? Math.ceil(total / limit) : 1
   const pageIndexes = needsClientVirtualHandling ? (limit > 0 ? workingIndexes.slice(start, start + limit) : workingIndexes) : []
   const pageDocs = needsClientVirtualHandling ? pageIndexes.map((index) => normalized[index]) : normalized
-  const selectedDocs = needsClientVirtualHandling ? pageDocs.map((doc) => applySelect(doc, args.select)).filter(Boolean) : pageDocs
+  const selectedDocs = pageDocs.map((doc) => applySelect(doc, args.select)).filter(Boolean)
 
   return {
     docs: selectedDocs,
@@ -1144,10 +1156,10 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
 
       try {
         const result = await this.client.query<Record<string, unknown>[]>(statement)
-        const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select) as Record<string, unknown>[], args.locale)
+        const docs = applyReadTransforms(this, args.collection, normalizeDocs(result) as Record<string, unknown>[], args.locale)
         const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
 
-        return shouldReturn ? populated[0] ?? null : null
+        return shouldReturn ? applySelect(populated[0] ?? null, args.select) : null
       } catch (error) {
         mapWriteError(this, args.collection, error)
       }
@@ -1172,16 +1184,16 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
     const statement = `UPDATE ${getRecordID(table, args.id)} ${shouldUseContent ? 'CONTENT' : 'MERGE'} ${literal(updateContent)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
 
     if (await queueTransactionStatement(this, args.req, statement)) {
-      const docs = applyReadTransforms(this, args.collection, [applySelect(normalizeDocument({ ...existingDoc, ...data, id: args.id }), args.select) as Record<string, unknown>], args.locale)
-      return shouldReturn ? docs[0] ?? null : null
+      const docs = applyReadTransforms(this, args.collection, [normalizeDocument({ ...existingDoc, ...data, id: args.id }) as Record<string, unknown>], args.locale)
+      return shouldReturn ? applySelect(docs[0] ?? null, args.select) : null
     }
 
     try {
       const result = await this.client.query<Record<string, unknown>[]>(statement)
-      const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select) as Record<string, unknown>[], args.locale)
+      const docs = applyReadTransforms(this, args.collection, normalizeDocs(result) as Record<string, unknown>[], args.locale)
       const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
 
-      return shouldReturn ? populated[0] ?? null : null
+      return shouldReturn ? applySelect(populated[0] ?? null, args.select) : null
     } catch (error) {
       mapWriteError(this, args.collection, error)
     }
@@ -1211,16 +1223,16 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
   const statement = `UPDATE ${getRecordID(table, found.id)} ${shouldUseContent ? 'CONTENT' : 'MERGE'} ${literal(updateContent)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
 
   if (await queueTransactionStatement(this, args.req, statement)) {
-    const docs = applyReadTransforms(this, args.collection, [applySelect(normalizeDocument({ ...found, ...data }), args.select) as Record<string, unknown>], args.locale)
-    return shouldReturn ? docs[0] ?? null : null
+    const docs = applyReadTransforms(this, args.collection, [normalizeDocument({ ...found, ...data }) as Record<string, unknown>], args.locale)
+    return shouldReturn ? applySelect(docs[0] ?? null, args.select) : null
   }
 
   try {
     const result = await this.client.query<Record<string, unknown>[]>(statement)
-    const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select) as Record<string, unknown>[], args.locale)
+    const docs = applyReadTransforms(this, args.collection, normalizeDocs(result) as Record<string, unknown>[], args.locale)
     const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
 
-    return shouldReturn ? populated[0] ?? null : null
+    return shouldReturn ? applySelect(populated[0] ?? null, args.select) : null
   } catch (error) {
     mapWriteError(this, args.collection, error)
   }

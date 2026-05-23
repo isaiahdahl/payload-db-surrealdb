@@ -275,28 +275,106 @@ export const setValueAtPath = (doc: Record<string, unknown>, path: string, value
   }
 }
 
+const hasTruthySelect = (select: Record<string, unknown>): boolean =>
+  Object.values(select).some((value) => value === true || (value && typeof value === 'object' && !Array.isArray(value) && hasTruthySelect(value as Record<string, unknown>)))
+
+const cloneForSelect = <T>(value: T): T => value === undefined || value === null ? value : structuredClone(value)
+
+const applyIncludeSelect = (value: unknown, select: unknown): unknown => {
+  if (select === true) return cloneForSelect(value)
+  if (!value || !select || typeof select !== 'object' || Array.isArray(select)) return undefined
+
+  if (Array.isArray(value)) {
+    return value.map((item) => applyIncludeSelect(item, select)).filter((item) => item !== undefined)
+  }
+
+  if (typeof value !== 'object') return cloneForSelect(value)
+
+  const source = value as Record<string, unknown>
+  if ('en' in source && !('relationTo' in source && 'value' in source) && !Object.prototype.hasOwnProperty.call(select as Record<string, unknown>, 'en')) {
+    const localized = Object.fromEntries(
+      Object.entries(source)
+        .map(([locale, localeValue]) => [locale, applyIncludeSelect(localeValue, select)])
+        .filter(([, localeValue]) => localeValue !== undefined),
+    )
+    return Object.keys(localized).length ? localized : undefined
+  }
+
+  const output: Record<string, unknown> = {}
+
+  if (source.id !== undefined) output.id = source.id
+  if (source.blockType !== undefined) output.blockType = source.blockType
+
+  for (const [key, nestedSelect] of Object.entries(select as Record<string, unknown>)) {
+    if (key in source) {
+      const nested = applyIncludeSelect(source[key], nestedSelect)
+      if (nested !== undefined) output[key] = nested
+      continue
+    }
+
+    if (source.blockType === key) {
+      const nested = applyIncludeSelect(source, nestedSelect)
+      if (nested && typeof nested === 'object') Object.assign(output, nested)
+    }
+  }
+
+  return Object.keys(output).length ? output : undefined
+}
+
+const applyExcludeSelect = (value: unknown, select: unknown): unknown => {
+  if (select === false) return undefined
+  if (!value || !select || typeof select !== 'object' || Array.isArray(select)) return cloneForSelect(value)
+
+  if (Array.isArray(value)) {
+    return value.map((item) => applyExcludeSelect(item, select)).filter((item) => item !== undefined)
+  }
+
+  if (typeof value !== 'object') return cloneForSelect(value)
+
+  const output = cloneForSelect(value) as Record<string, unknown>
+  if ('en' in output && !('relationTo' in output && 'value' in output) && !Object.prototype.hasOwnProperty.call(select as Record<string, unknown>, 'en')) {
+    return Object.fromEntries(
+      Object.entries(output).map(([locale, localeValue]) => [locale, applyExcludeSelect(localeValue, select)]),
+    )
+  }
+
+  for (const [key, nestedSelect] of Object.entries(select as Record<string, unknown>)) {
+    if (key in output) {
+      const nested = applyExcludeSelect(output[key], nestedSelect)
+      if (nested === undefined) delete output[key]
+      else output[key] = nested
+      continue
+    }
+
+    if (output.blockType === key) {
+      if (nestedSelect === false) {
+        for (const fieldKey of Object.keys(output)) {
+          if (fieldKey !== 'id' && fieldKey !== 'blockType') delete output[fieldKey]
+        }
+      } else {
+        const nested = applyExcludeSelect(output, nestedSelect)
+        if (nested && typeof nested === 'object') {
+          for (const existingKey of Object.keys(output)) delete output[existingKey]
+          Object.assign(output, nested)
+        }
+      }
+    }
+  }
+
+  return output
+}
+
 export const applySelect = <T extends Record<string, unknown> | null>(doc: T, select?: Record<string, unknown>): T => {
   if (!doc || !select || Object.keys(select).length === 0) {
     return doc
   }
 
-  const entries = Object.entries(select).filter(([, value]) => Boolean(value))
-
-  if (!entries.length) {
-    return doc
+  if (!hasTruthySelect(select)) {
+    return applyExcludeSelect(doc, select) as T
   }
 
-  const projected: Record<string, unknown> = { id: doc.id }
-
-  for (const [path] of entries) {
-    const value = getValueAtPath(doc, path)
-
-    if (value !== undefined) {
-      setValueAtPath(projected, path, value)
-    }
-  }
-
-  return projected as T
+  const projected = applyIncludeSelect(doc, select)
+  return (projected && typeof projected === 'object' ? projected : { id: doc.id }) as T
 }
 
 const simpleIndexFieldTypes = new Set([

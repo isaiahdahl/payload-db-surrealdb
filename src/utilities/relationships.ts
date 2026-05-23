@@ -1,6 +1,6 @@
 import type { SurrealAdapter } from '../index.js'
 
-import { buildWhere, pathToSQL } from '../queries/buildWhere.js'
+import { buildWhere } from '../queries/buildWhere.js'
 import { getCollectionConfig } from './fields.js'
 import { escapeIdent, literal, normalizeDocument } from './sql.js'
 
@@ -524,10 +524,9 @@ const resolveJoinFields = async (
       }
 
       const targetTable = escapeIdent(targetCollection.replaceAll('-', '_'))
-      const onPath = pathToSQL(field.on)
       const targetDocs = normalizeFetchedDocs(
         await adapter.client.query(
-          `SELECT * FROM ${targetTable} WHERE ${onPath} IN ${literal(parentIDs.map(String))} OR ${onPath} CONTAINSANY ${literal(parentIDs.map(String))} ${sort};`,
+          `SELECT * FROM ${targetTable} ${sort};`,
         ) as Record<string, unknown>[],
       )
       const populatedTargets = depth > 0 ? await transformRelationshipReads(adapter, targetCollection, targetDocs, depth - 1) : targetDocs

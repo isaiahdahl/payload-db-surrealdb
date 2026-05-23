@@ -1,4 +1,4 @@
-import { buildWhere, pathToSQL } from '../queries/buildWhere.js';
+import { buildWhere } from '../queries/buildWhere.js';
 import { getCollectionConfig } from './fields.js';
 import { escapeIdent, literal, normalizeDocument } from './sql.js';
 const isPlainObject = (value) => Boolean(value) && typeof value === 'object' && !Array.isArray(value);
@@ -363,8 +363,7 @@ const resolveJoinFields = async (adapter, collection, docs, depth, joins) => {
                 continue;
             }
             const targetTable = escapeIdent(targetCollection.replaceAll('-', '_'));
-            const onPath = pathToSQL(field.on);
-            const targetDocs = normalizeFetchedDocs(await adapter.client.query(`SELECT * FROM ${targetTable} WHERE ${onPath} IN ${literal(parentIDs.map(String))} OR ${onPath} CONTAINSANY ${literal(parentIDs.map(String))} ${sort};`));
+            const targetDocs = normalizeFetchedDocs(await adapter.client.query(`SELECT * FROM ${targetTable} ${sort};`));
             const populatedTargets = depth > 0 ? await transformRelationshipReads(adapter, targetCollection, targetDocs, depth - 1) : targetDocs;
             for (const [index, targetDoc] of targetDocs.entries()) {
                 const foreignValue = getValueAtPath(targetDoc, field.on);

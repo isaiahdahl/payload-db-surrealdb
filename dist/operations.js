@@ -263,11 +263,14 @@ const getSortSQL = (sort) => {
     if (!values.length) {
         return 'ORDER BY createdAt DESC';
     }
-    const parts = values.map((sortValue, index) => {
-        const direction = sortValue.startsWith('-') || (index > 0 && !sortValue.startsWith('+')) ? 'DESC' : 'ASC';
+    const parts = values.map((sortValue) => {
+        const direction = sortValue.startsWith('-') ? 'DESC' : 'ASC';
         const field = sortValue.replace(/^-|^\+/, '');
         return `${field === 'id' ? 'id' : pathToSQL(field)} ${direction}`;
     });
+    if (!values.some((value) => value.replace(/^-|^\+/, '') === 'createdAt')) {
+        parts.push('createdAt DESC');
+    }
     return `ORDER BY ${parts.join(', ')}`;
 };
 const getPagination = (args) => {
@@ -503,7 +506,14 @@ const applyReadTransforms = (adapter, collection, docs, locale, shouldPrunePubli
     }
     return normalized.map((doc) => collapseEnglishLocaleObjects(collapseLocalizedValues(doc, fields, locale)));
 };
-const getDepth = (args) => typeof args.depth === 'number' ? args.depth : 0;
+const getDepth = (args) => {
+    if (typeof args.depth === 'number') {
+        if (args.depth === 0 && args.req?.payloadAPI === 'GraphQL' && args.select)
+            return 1;
+        return args.depth;
+    }
+    return 0;
+};
 const valuesEqual = (a, b) => JSON.stringify(normalizeComparableValue(a)) === JSON.stringify(normalizeComparableValue(b));
 const appendUnique = (target, value) => {
     const values = Array.isArray(value) ? value : [value];
@@ -843,19 +853,19 @@ export const create = async function create(args) {
     if (await queueTransactionStatement(this, args.req, statement)) {
         const doc = normalizeDocument({ ...data, id: resolvedID });
         await addTransactionDoc(this, args.req, args.collection, doc);
-        const docs = applyReadTransforms(this, args.collection, [applySelect(doc, args.select)], args.locale);
-        return shouldReturn ? docs[0] ?? null : null;
+        const docs = applyReadTransforms(this, args.collection, [doc], args.locale);
+        return shouldReturn ? applySelect(docs[0] ?? null, args.select) : null;
     }
     try {
         const result = await this.client.query(statement);
-        const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select), args.locale, !args.draftsEnabled);
+        const docs = applyReadTransforms(this, args.collection, normalizeDocs(result), args.locale, !args.draftsEnabled);
         if (docs[0] && id !== undefined) {
             const idField = collectionConfig?.fields?.find((field) => field.name === 'id');
             const customIDType = this.payload?.collections?.[args.collection]?.customIDType ?? collectionConfig?.customIDType;
             docs[0].id = (idField?.type === 'number' || customIDType === 'number' || args.collection.endsWith('-number')) && !Number.isNaN(Number(resolvedID)) ? Number(resolvedID) : resolvedID;
         }
         const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args), args.joins);
-        return shouldReturn ? populated[0] ?? null : null;
+        return shouldReturn ? applySelect(populated[0] ?? null, args.select) : null;
     }
     catch (error) {
         mapWriteError(this, args.collection, error);
@@ -870,9 +880,9 @@ export const findOne = (async function findOne(args) {
     const where = buildRelationshipAwareWhere(this, args.collection, args.where);
     try {
         const result = await this.client.query(`SELECT * FROM ${table} ${where} LIMIT 1;`);
-        const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select), args.locale, !args.draftsEnabled);
+        const docs = applyReadTransforms(this, args.collection, normalizeDocs(result), args.locale, !args.draftsEnabled);
         const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args), args.joins);
-        return populated[0] ?? null;
+        return applySelect(populated[0] ?? null, args.select);
     }
     catch (error) {
         if (isMissingTableError(error)) {
@@ -889,9 +899,11 @@ export const find = async function find(args) {
     const start = pagination.start;
     const currentPage = pagination.currentPage;
     const useClientVirtuals = whereUsesVirtual(this, args.collection, args.where);
-    const useClientSort = sortUsesVirtual(this, args.collection, args.sort);
+    const collectionConfig = getCollectionConfig(this, args.collection);
+    const effectiveSort = args.sort ?? collectionConfig?.defaultSort ?? (collectionConfig?.orderable ? '_order' : undefined);
+    const useClientSort = sortUsesVirtual(this, args.collection, effectiveSort);
     const where = useClientVirtuals ? '' : buildRelationshipAwareWhere(this, args.collection, args.where);
-    const sort = useClientSort ? '' : getSortSQL(args.sort);
+    const sort = useClientSort ? '' : getSortSQL(effectiveSort);
     const limitSQL = limit > 0 && !useClientVirtuals && !useClientSort ? `LIMIT ${limit} START ${start}` : '';
     let docs = [];
     try {
@@ -904,7 +916,7 @@ export const find = async function find(args) {
     }
     const needsClientVirtualHandling = useClientVirtuals || useClientSort;
     const transactionDocs = await getTransactionDocs(this, args.req, args.collection);
-    const baseDocs = applyReadTransforms(this, args.collection, [...normalizeDocs(docs, needsClientVirtualHandling ? undefined : args.select), ...transactionDocs], needsClientVirtualHandling ? 'all' : args.locale, !args.draftsEnabled);
+    const baseDocs = applyReadTransforms(this, args.collection, [...normalizeDocs(docs), ...transactionDocs], needsClientVirtualHandling ? 'all' : args.locale, !args.draftsEnabled);
     let normalized = needsClientVirtualHandling
         ? baseDocs
         : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args), args.joins);
@@ -923,7 +935,7 @@ export const find = async function find(args) {
     }
     if (useClientSort) {
         workingIndexes.sort((a, b) => {
-            for (const sortValue of sortValues(args.sort)) {
+            for (const sortValue of sortValues(effectiveSort)) {
                 const direction = sortValue.startsWith('-') ? -1 : 1;
                 const field = sortValue.replace(/^-|^\+/, '');
                 const path = getVirtualAlias(this, args.collection, field) ?? getLocalizedFieldPath(this, args.collection, field, args.locale) ?? field.replaceAll('__', '.');
@@ -938,7 +950,7 @@ export const find = async function find(args) {
     const totalPages = limit > 0 ? Math.ceil(total / limit) : 1;
     const pageIndexes = needsClientVirtualHandling ? (limit > 0 ? workingIndexes.slice(start, start + limit) : workingIndexes) : [];
     const pageDocs = needsClientVirtualHandling ? pageIndexes.map((index) => normalized[index]) : normalized;
-    const selectedDocs = needsClientVirtualHandling ? pageDocs.map((doc) => applySelect(doc, args.select)).filter(Boolean) : pageDocs;
+    const selectedDocs = pageDocs.map((doc) => applySelect(doc, args.select)).filter(Boolean);
     return {
         docs: selectedDocs,
         hasNextPage: limit > 0 ? currentPage < totalPages : false,
@@ -1006,9 +1018,9 @@ export const updateOne = async function updateOne(args) {
             }
             try {
                 const result = await this.client.query(statement);
-                const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select), args.locale);
+                const docs = applyReadTransforms(this, args.collection, normalizeDocs(result), args.locale);
                 const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args), args.joins);
-                return shouldReturn ? populated[0] ?? null : null;
+                return shouldReturn ? applySelect(populated[0] ?? null, args.select) : null;
             }
             catch (error) {
                 mapWriteError(this, args.collection, error);
@@ -1033,14 +1045,14 @@ export const updateOne = async function updateOne(args) {
         const updateContent = shouldUseContent ? { ...existingDoc, ...data, id: args.id } : data;
         const statement = `UPDATE ${getRecordID(table, args.id)} ${shouldUseContent ? 'CONTENT' : 'MERGE'} ${literal(updateContent)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
         if (await queueTransactionStatement(this, args.req, statement)) {
-            const docs = applyReadTransforms(this, args.collection, [applySelect(normalizeDocument({ ...existingDoc, ...data, id: args.id }), args.select)], args.locale);
-            return shouldReturn ? docs[0] ?? null : null;
+            const docs = applyReadTransforms(this, args.collection, [normalizeDocument({ ...existingDoc, ...data, id: args.id })], args.locale);
+            return shouldReturn ? applySelect(docs[0] ?? null, args.select) : null;
         }
         try {
             const result = await this.client.query(statement);
-            const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select), args.locale);
+            const docs = applyReadTransforms(this, args.collection, normalizeDocs(result), args.locale);
             const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args), args.joins);
-            return shouldReturn ? populated[0] ?? null : null;
+            return shouldReturn ? applySelect(populated[0] ?? null, args.select) : null;
         }
         catch (error) {
             mapWriteError(this, args.collection, error);
@@ -1068,14 +1080,14 @@ export const updateOne = async function updateOne(args) {
     const updateContent = shouldUseContent ? { ...found, ...data } : data;
     const statement = `UPDATE ${getRecordID(table, found.id)} ${shouldUseContent ? 'CONTENT' : 'MERGE'} ${literal(updateContent)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
     if (await queueTransactionStatement(this, args.req, statement)) {
-        const docs = applyReadTransforms(this, args.collection, [applySelect(normalizeDocument({ ...found, ...data }), args.select)], args.locale);
-        return shouldReturn ? docs[0] ?? null : null;
+        const docs = applyReadTransforms(this, args.collection, [normalizeDocument({ ...found, ...data })], args.locale);
+        return shouldReturn ? applySelect(docs[0] ?? null, args.select) : null;
     }
     try {
         const result = await this.client.query(statement);
-        const docs = applyReadTransforms(this, args.collection, normalizeDocs(result, args.select), args.locale);
+        const docs = applyReadTransforms(this, args.collection, normalizeDocs(result), args.locale);
         const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args), args.joins);
-        return shouldReturn ? populated[0] ?? null : null;
+        return shouldReturn ? applySelect(populated[0] ?? null, args.select) : null;
     }
     catch (error) {
         mapWriteError(this, args.collection, error);
