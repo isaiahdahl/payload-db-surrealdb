@@ -117,7 +117,7 @@ PAYLOAD_DATABASE=surrealdb pnpm test:int test/locked-documents/int.spec.ts
 PAYLOAD_DATABASE=surrealdb pnpm test:int test/queues/int.spec.ts
 ```
 
-Current status: `test/versions/int.spec.ts` is green at 98 passed, `test/localization/int.spec.ts` is green at 117 passed, and `test/locked-documents/int.spec.ts` is green at 13 passed. `test/trash/int.spec.ts` is partially passing at 90 passed / 5 todo / 7 failed. `test/queues/int.spec.ts` currently fails broadly (72 failed / 2 skipped), starting with duplicate user seeding / queue concurrency behavior.
+Current status: `test/versions/int.spec.ts` is green at 98 passed, `test/localization/int.spec.ts` is green at 117 passed, and `test/locked-documents/int.spec.ts` is green at 13 passed. `test/trash/int.spec.ts` is nearly green at 96 passed / 5 todo / 1 failed; the remaining failure is a REST version query edge after restoring a soft-deleted document. `test/queues/int.spec.ts` currently fails broadly (72 failed / 2 skipped), starting with duplicate user seeding / queue concurrency behavior.
 
 Must support:
 

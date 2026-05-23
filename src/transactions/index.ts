@@ -64,7 +64,10 @@ export const addTransactionDoc = async (
   const transaction = await getTransaction(adapter, req)
   if (!transaction) return
   transaction.docs ??= {}
-  transaction.docs[collection] = [...(transaction.docs[collection] ?? []), doc]
+  const snapshot = typeof structuredClone === 'function'
+    ? structuredClone(doc)
+    : JSON.parse(JSON.stringify(doc))
+  transaction.docs[collection] = [...(transaction.docs[collection] ?? []), snapshot]
 }
 
 export const getTransactionDocs = async (

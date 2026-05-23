@@ -28,8 +28,44 @@ const coerceValue = (field, value) => {
     return value;
 };
 const getFieldConfig = (fields, path) => {
-    const root = path.split('.')[0];
-    return fields?.find((field) => field.name === root);
+    const segments = path.replaceAll('__', '.').split('.').filter(Boolean);
+    const walk = (currentFields, index) => {
+        if (!currentFields || index >= segments.length)
+            return undefined;
+        for (const field of currentFields) {
+            if (field.name === segments[index]) {
+                if (index === segments.length - 1)
+                    return field;
+                if (field.fields) {
+                    const match = walk(field.fields, index + 1);
+                    if (match)
+                        return match;
+                }
+                if (field.tabs) {
+                    for (const tab of field.tabs) {
+                        const nextIndex = tab.name === segments[index + 1] ? index + 2 : index + 1;
+                        const match = walk(tab.fields, nextIndex);
+                        if (match)
+                            return match;
+                    }
+                }
+                if (field.blocks) {
+                    for (const block of field.blocks) {
+                        const match = walk(block.fields, index + 1);
+                        if (match)
+                            return match;
+                    }
+                }
+            }
+            if (!field.name && field.fields) {
+                const match = walk(field.fields, index);
+                if (match)
+                    return match;
+            }
+        }
+        return undefined;
+    };
+    return walk(fields, 0);
 };
 const isHasManyRelationship = (field) => Boolean(field?.hasMany && (field.type === 'relationship' || field.type === 'upload'));
 const operatorToSQL = (field, operator, value, fields) => {

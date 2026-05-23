@@ -214,7 +214,9 @@ const matchesOperator = (actual: unknown, operator: string, expected: unknown): 
               : valuesEqual(item, value)
           )))
         : expectedValues.some((value) => String(actual ?? '').toLowerCase().includes(String(value ?? '').toLowerCase()))
-    case 'equals': return actualValues.some((value) => expectedValues.some((candidate) => valuesEqual(value, candidate)))
+    case 'equals':
+      if (expectedValues.some((candidate) => candidate === null)) return actual === null || actual === undefined
+      return actualValues.some((value) => expectedValues.some((candidate) => valuesEqual(value, candidate)))
     case 'exists': return toBoolean(expected) ? actual !== null && actual !== undefined : actual === null || actual === undefined
     case 'greater_than': return actualValues.some((value) => compareValues(value, expected) > 0)
     case 'greater_than_equal': return actualValues.some((value) => compareValues(value, expected) >= 0)
