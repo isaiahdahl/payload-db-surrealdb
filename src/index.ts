@@ -102,7 +102,18 @@ const buildIndexStatements = (table: string, fields: ReturnType<typeof getIndexe
   })
 }
 
+const normalizeOrderableJoinLocalization = (fields: any[] = []): void => {
+  for (const field of fields) {
+    if (field?.type === 'join' && field.orderable) field.localized = false
+    if (field?.fields) normalizeOrderableJoinLocalization(field.fields)
+    if (field?.tabs) for (const tab of field.tabs) normalizeOrderableJoinLocalization(tab.fields ?? [])
+    if (field?.blocks) for (const block of field.blocks) normalizeOrderableJoinLocalization(block.fields ?? [])
+  }
+}
+
 const init: NonNullable<BaseDatabaseAdapter['init']> = async function init(this: SurrealAdapter) {
+  for (const collection of this.payload.config.collections ?? []) normalizeOrderableJoinLocalization(collection.fields ?? [])
+
   await connect.call(this)
 
   const statements: string[] = []

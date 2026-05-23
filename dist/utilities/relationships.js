@@ -377,10 +377,11 @@ const resolveJoinFields = async (adapter, collection, docs, depth, joins) => {
         for (const doc of docs) {
             const joined = byParent.get(String(doc.id)) ?? [];
             const pageDocs = limit > 0 ? joined.slice(0, limit) : joined;
+            const exposedDocs = field.orderable ? pageDocs.map((pageDoc) => pageDoc.id) : pageDocs;
             const value = field.hasMany === false
-                ? (pageDocs[0] ?? null)
+                ? (exposedDocs[0] ?? null)
                 : {
-                    docs: pageDocs,
+                    docs: exposedDocs,
                     hasNextPage: limit > 0 ? joined.length > limit : false,
                     hasPrevPage: false,
                     limit,

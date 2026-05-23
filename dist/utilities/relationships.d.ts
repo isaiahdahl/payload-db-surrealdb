@@ -10,6 +10,7 @@ type Field = {
     hasMany?: boolean;
     limit?: number;
     localized?: boolean;
+    orderable?: boolean;
     name?: string;
     on?: string;
     relationTo?: string | string[];

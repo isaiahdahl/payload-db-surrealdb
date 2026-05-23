@@ -62,7 +62,7 @@ Current status from the latest sweep:
 - `test/fields/int.spec.ts`: 157 passed / 2 skipped.
 - `test/field-paths/int.spec.ts`: 2 passed.
 - `test/select/int.spec.ts`: 115 passed.
-- `test/sort/int.spec.ts`: 36 passed / 1 failed; the remaining failure is the orderable join field readback edge.
+- `test/sort/int.spec.ts`: 37 passed.
 - `test/query-presets/int.spec.ts`: 10 passed / 1 skipped / 1 failed (query preset lockout access edge case).
 
 Must support:

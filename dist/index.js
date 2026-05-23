@@ -34,7 +34,23 @@ const buildIndexStatements = (table, fields) => {
         return `DEFINE INDEX IF NOT EXISTS ${escapeIdent(getIndexName(table, field.name, field.unique))} ON TABLE ${escapeIdent(table)} FIELDS ${escapeIdent(field.name)}${unique};`;
     });
 };
+const normalizeOrderableJoinLocalization = (fields = []) => {
+    for (const field of fields) {
+        if (field?.type === 'join' && field.orderable)
+            field.localized = false;
+        if (field?.fields)
+            normalizeOrderableJoinLocalization(field.fields);
+        if (field?.tabs)
+            for (const tab of field.tabs)
+                normalizeOrderableJoinLocalization(tab.fields ?? []);
+        if (field?.blocks)
+            for (const block of field.blocks)
+                normalizeOrderableJoinLocalization(block.fields ?? []);
+    }
+};
 const init = async function init() {
+    for (const collection of this.payload.config.collections ?? [])
+        normalizeOrderableJoinLocalization(collection.fields ?? []);
     await connect.call(this);
     const statements = [];
     this.tables = {};

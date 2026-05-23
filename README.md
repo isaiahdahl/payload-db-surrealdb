@@ -76,7 +76,7 @@ Known partial/failing suites from the current 1.0 validation sweep:
 | `test/uploads/int.spec.ts` | 100 passed / 2 environment-sensitive failures |
 | `test/joins/int.spec.ts` | 49 passed / 1 skipped / 25 failed |
 | `test/select/int.spec.ts` | 115 passed |
-| `test/sort/int.spec.ts` | 36 passed / 1 failed |
+| `test/sort/int.spec.ts` | 37 passed |
 | `test/query-presets/int.spec.ts` | 10 passed / 1 skipped / 1 failed |
 | `test/trash/int.spec.ts` | 90 passed / 5 todo / 7 failed |
 | `test/queues/int.spec.ts` | 72 failed / 2 skipped |
@@ -89,7 +89,7 @@ Uploads status:
 Still to validate/fix before 1.0:
 
 - joins suite
-- final sort orderable-join edge
+- remaining joins edge cases
 - trash, locked documents, queues
 - admin/browser E2E flows across templates
 - package-install runtime checks in standalone Payload apps
