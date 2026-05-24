@@ -33,7 +33,10 @@ export const addTransactionDoc = async (adapter, req, collection, doc) => {
     const snapshot = typeof structuredClone === 'function'
         ? structuredClone(doc)
         : JSON.parse(JSON.stringify(doc));
-    transaction.docs[collection] = [...(transaction.docs[collection] ?? []), snapshot];
+    transaction.docs[collection] = [
+        ...(transaction.docs[collection] ?? []).filter((existing) => existing.id !== snapshot.id),
+        snapshot,
+    ];
 };
 export const getTransactionDocs = async (adapter, req, collection) => {
     const transaction = await getTransaction(adapter, req);

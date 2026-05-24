@@ -74,11 +74,11 @@ Known partial/failing suites from the current 1.0 validation sweep:
 | Suite | Current result |
 | --- | --- |
 | `test/uploads/int.spec.ts` | 100 passed / 2 environment-sensitive failures |
-| `test/joins/int.spec.ts` | 49 passed / 1 skipped / 25 failed |
+| `test/joins/int.spec.ts` | 50 passed / 1 skipped / 24 failed |
 | `test/select/int.spec.ts` | 115 passed |
 | `test/sort/int.spec.ts` | 37 passed |
-| `test/query-presets/int.spec.ts` | 10 passed / 1 skipped / 1 failed |
-| `test/trash/int.spec.ts` | 96 passed / 5 todo / 1 failed |
+| `test/query-presets/int.spec.ts` | 11 passed / 1 skipped |
+| `test/trash/int.spec.ts` | 97 passed / 5 todo |
 | `test/queues/int.spec.ts` | 72 failed / 2 skipped |
 
 Uploads status:

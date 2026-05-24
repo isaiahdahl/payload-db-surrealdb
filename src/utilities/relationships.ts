@@ -196,6 +196,37 @@ const collectJoinFields = (fields: Field[] = [], prefix: string[] = []): Field[]
   return joins
 }
 
+const sortValues = (sort?: string | string[]): string[] => (Array.isArray(sort) ? sort : sort ? [sort] : [])
+  .flatMap((value) => String(value).split(','))
+  .map((value) => value.trim())
+  .filter(Boolean)
+
+const compareValues = (a: unknown, b: unknown): number => {
+  if (a === b) return 0
+  if (a === null || a === undefined) return 1
+  if (b === null || b === undefined) return -1
+  return String(a).localeCompare(String(b), undefined, { numeric: true })
+}
+
+const sortJoinDocs = (docs: Record<string, unknown>[], sort?: string | string[]): Record<string, unknown>[] => {
+  const values = sortValues(sort).length ? sortValues(sort) : ['-createdAt']
+
+  return [...docs].sort((a, b) => {
+    for (const sortValue of values) {
+      const direction = sortValue.startsWith('-') ? -1 : 1
+      const path = sortValue.replace(/^-|^\+/, '')
+      const aValue = getValueAtPath('value' in a && 'relationTo' in a ? a.value as Record<string, unknown> : a, path)
+      const bValue = getValueAtPath('value' in b && 'relationTo' in b ? b.value as Record<string, unknown> : b, path)
+      const result = compareValues(aValue, bValue)
+      if (result !== 0) return direction * result
+    }
+
+    if ('relationTo' in a && 'relationTo' in b) return compareValues(b.relationTo, a.relationTo)
+
+    return 0
+  })
+}
+
 const getSortSQL = (sort?: string | string[]): string => {
   const sortValue = Array.isArray(sort) ? sort[0] : sort
 
@@ -535,16 +566,22 @@ const resolveJoinFields = async (
       for (const [index, targetDoc] of targetDocs.entries()) {
         const foreignValue = getValueAtPath(targetDoc, field.on)
         const ids = flattenJoinValues(foreignValue)
+        const joinedDoc = Array.isArray(field.collection)
+          ? {
+              relationTo: targetCollection,
+              value: depth > 0 ? populatedTargets[index] : populatedTargets[index]?.id,
+            }
+          : populatedTargets[index]
 
         for (const id of ids) {
           const key = String(id)
-          byParent.set(key, [...(byParent.get(key) ?? []), populatedTargets[index]])
+          byParent.set(key, [...(byParent.get(key) ?? []), joinedDoc])
         }
       }
     }
 
     for (const doc of docs) {
-      const joined = byParent.get(String(doc.id)) ?? []
+      const joined = sortJoinDocs(byParent.get(String(doc.id)) ?? [], joinOptions?.sort ?? field.sort ?? field.defaultSort)
       const pageDocs = limit > 0 ? joined.slice(0, limit) : joined
       const exposedDocs = field.orderable ? pageDocs.map((pageDoc) => pageDoc.id) : pageDocs
       const value = field.hasMany === false

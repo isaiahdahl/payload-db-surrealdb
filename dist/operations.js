@@ -164,6 +164,7 @@ const pointInPolygon = (value, polygon) => {
     return inside;
 };
 const matchesOperator = (actual, operator, expected) => {
+    expected = expected === 'null' ? null : expected;
     const actualValues = Array.isArray(actual) ? actual : [actual];
     const expectedValues = Array.isArray(expected) ? expected : [expected];
     switch (operator) {
@@ -275,6 +276,12 @@ const getSortSQL = (sort) => {
         parts.push('createdAt DESC');
     }
     return `ORDER BY ${parts.join(', ')}`;
+};
+const mergeTransactionDocs = (docs, transactionDocs) => {
+    if (!transactionDocs.length)
+        return docs;
+    const transactionIDs = new Set(transactionDocs.map((doc) => doc.id));
+    return [...docs.filter((doc) => !transactionIDs.has(doc.id)), ...transactionDocs];
 };
 const getPagination = (args) => {
     const limit = Number(args.limit ?? 0);
@@ -919,7 +926,8 @@ export const find = async function find(args) {
     }
     const needsClientVirtualHandling = useClientVirtuals || useClientSort;
     const transactionDocs = await getTransactionDocs(this, args.req, args.collection);
-    const baseDocs = applyReadTransforms(this, args.collection, [...normalizeDocs(docs), ...transactionDocs], needsClientVirtualHandling ? 'all' : args.locale, !args.draftsEnabled);
+    const mergedDocs = mergeTransactionDocs(normalizeDocs(docs), transactionDocs);
+    const baseDocs = applyReadTransforms(this, args.collection, mergedDocs, needsClientVirtualHandling ? 'all' : args.locale, !args.draftsEnabled);
     let normalized = needsClientVirtualHandling
         ? baseDocs
         : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args), args.joins);

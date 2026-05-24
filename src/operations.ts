@@ -202,6 +202,7 @@ const pointInPolygon = (value: unknown, polygon: unknown): boolean => {
 }
 
 const matchesOperator = (actual: unknown, operator: string, expected: unknown): boolean => {
+  expected = expected === 'null' ? null : expected
   const actualValues = Array.isArray(actual) ? actual : [actual]
   const expectedValues = Array.isArray(expected) ? expected : [expected]
 
@@ -321,6 +322,16 @@ const getSortSQL = (sort?: string | string[]): string => {
   }
 
   return `ORDER BY ${parts.join(', ')}`
+}
+
+const mergeTransactionDocs = (
+  docs: Record<string, unknown>[],
+  transactionDocs: Record<string, unknown>[],
+): Record<string, unknown>[] => {
+  if (!transactionDocs.length) return docs
+  const transactionIDs = new Set(transactionDocs.map((doc) => doc.id))
+
+  return [...docs.filter((doc) => !transactionIDs.has(doc.id)), ...transactionDocs]
 }
 
 const getPagination = (args: Record<string, any>) => {
@@ -1038,7 +1049,8 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
 
   const needsClientVirtualHandling = useClientVirtuals || useClientSort
   const transactionDocs = await getTransactionDocs(this, args.req, args.collection)
-  const baseDocs = applyReadTransforms(this, args.collection, [...normalizeDocs(docs) as Record<string, unknown>[], ...transactionDocs], needsClientVirtualHandling ? 'all' : args.locale, !(args as Record<string, unknown>).draftsEnabled)
+  const mergedDocs = mergeTransactionDocs(normalizeDocs(docs) as Record<string, unknown>[], transactionDocs)
+  const baseDocs = applyReadTransforms(this, args.collection, mergedDocs, needsClientVirtualHandling ? 'all' : args.locale, !(args as Record<string, unknown>).draftsEnabled)
   let normalized = needsClientVirtualHandling
     ? baseDocs
     : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args as never), (args as Record<string, unknown>).joins as never)

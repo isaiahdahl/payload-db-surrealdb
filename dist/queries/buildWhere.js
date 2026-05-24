@@ -14,6 +14,8 @@ export const pathToSQL = (path) => {
 };
 const valueToSQL = (value) => literal(value);
 const coerceValue = (field, value) => {
+    if (value === 'null')
+        return null;
     if (field?.type === 'number') {
         if (Array.isArray(value)) {
             return value.map((item) => (typeof item === 'string' && item.trim() !== '' && !Number.isNaN(Number(item)) ? Number(item) : item));

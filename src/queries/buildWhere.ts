@@ -30,6 +30,8 @@ export const pathToSQL = (path: string): string => {
 const valueToSQL = (value: unknown): string => literal(value)
 
 const coerceValue = (field: Field | undefined, value: unknown): unknown => {
+  if (value === 'null') return null
+
   if (field?.type === 'number') {
     if (Array.isArray(value)) {
       return value.map((item) => (typeof item === 'string' && item.trim() !== '' && !Number.isNaN(Number(item)) ? Number(item) : item))
