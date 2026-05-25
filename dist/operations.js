@@ -932,7 +932,7 @@ export const find = async function find(args) {
         ? baseDocs
         : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args), args.joins);
     let workingDocs = needsClientVirtualHandling
-        ? await transformRelationshipReads(this, args.collection, structuredClone(baseDocs), Math.max(getDepth(args), 5), args.joins)
+        ? await transformRelationshipReads(this, args.collection, structuredClone(baseDocs), Math.max(getDepth(args), 1), args.joins)
         : normalized;
     let workingIndexes = workingDocs.map((_, index) => index);
     if (useClientVirtuals) {

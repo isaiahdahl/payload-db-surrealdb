@@ -1055,7 +1055,7 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
     ? baseDocs
     : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
   let workingDocs = needsClientVirtualHandling
-    ? await transformRelationshipReads(this, args.collection, structuredClone(baseDocs), Math.max(getDepth(args as never), 5), (args as Record<string, unknown>).joins as never)
+    ? await transformRelationshipReads(this, args.collection, structuredClone(baseDocs), Math.max(getDepth(args as never), 1), (args as Record<string, unknown>).joins as never)
     : normalized
   let workingIndexes = workingDocs.map((_, index) => index)
 

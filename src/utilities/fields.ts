@@ -224,6 +224,10 @@ export const getValueAtPath = (doc: Record<string, unknown>, path: string): unkn
 
   const getValue = (value: unknown, parts: string[]): unknown => {
     if (!parts.length) {
+      if (value && typeof value === 'object' && !Array.isArray(value) && Array.isArray((value as Record<string, unknown>).docs)) {
+        return (value as Record<string, unknown>).docs
+      }
+
       return value
     }
 
@@ -244,6 +248,10 @@ export const getValueAtPath = (doc: Record<string, unknown>, path: string): unkn
 
       if (part in objectValue) {
         return getValue(objectValue[part], rest)
+      }
+
+      if (Array.isArray(objectValue.docs)) {
+        return getValue(objectValue.docs, parts)
       }
 
       if (typeof objectValue.relationTo === 'string' && objectValue.value && typeof objectValue.value === 'object') {
