@@ -139,7 +139,7 @@ const compareValues = (a, b) => {
         return 1;
     if (b === null || b === undefined)
         return -1;
-    return String(a).localeCompare(String(b), undefined, { numeric: true });
+    return String(a).localeCompare(String(b));
 };
 const sortJoinDocs = (docs, sort) => {
     const values = sortValues(sort).length ? sortValues(sort) : ['-createdAt'];

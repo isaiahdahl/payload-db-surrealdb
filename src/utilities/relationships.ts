@@ -205,7 +205,7 @@ const compareValues = (a: unknown, b: unknown): number => {
   if (a === b) return 0
   if (a === null || a === undefined) return 1
   if (b === null || b === undefined) return -1
-  return String(a).localeCompare(String(b), undefined, { numeric: true })
+  return String(a).localeCompare(String(b))
 }
 
 const sortJoinDocs = (docs: Record<string, unknown>[], sort?: string | string[]): Record<string, unknown>[] => {
