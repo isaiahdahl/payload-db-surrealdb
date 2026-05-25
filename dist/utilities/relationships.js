@@ -158,6 +158,27 @@ const sortJoinDocs = (docs, sort) => {
         return 0;
     });
 };
+const filterJoinWhereForCollection = (where, collection) => {
+    if (!isPlainObject(where))
+        return where;
+    const entries = Object.entries(where).flatMap(([key, value]) => {
+        if ((key === 'and' || key === 'or') && Array.isArray(value)) {
+            const filtered = value
+                .map((entry) => filterJoinWhereForCollection(entry, collection))
+                .filter((entry) => isPlainObject(entry) && Object.keys(entry).length > 0);
+            return filtered.length ? [[key, filtered]] : [];
+        }
+        if (key !== 'relationTo')
+            return [[key, value]];
+        if (!isPlainObject(value))
+            return [];
+        const equals = value.equals;
+        const inValue = value.in;
+        const matches = equals === collection || (Array.isArray(inValue) && inValue.includes(collection));
+        return matches ? [] : [['id', { equals: null }]];
+    });
+    return Object.fromEntries(entries);
+};
 const getSortSQL = (sort) => {
     const sortValue = Array.isArray(sort) ? sort[0] : sort;
     if (!sortValue) {
@@ -389,7 +410,6 @@ const resolveJoinFields = async (adapter, collection, docs, depth, joins) => {
         const start = limit > 0 ? (page - 1) * limit : 0;
         const collections = Array.isArray(field.collection) ? field.collection : [field.collection];
         const joinWhere = joinOptions && 'where' in joinOptions ? joinOptions.where : field.where;
-        const whereSQL = buildWhere(joinWhere, getCollectionConfig(adapter, collections[0] ?? '')?.fields);
         const sort = getSortSQL(joinOptions?.sort ?? field.sort ?? field.defaultSort);
         const byParent = new Map();
         for (const targetCollection of collections) {
@@ -397,6 +417,8 @@ const resolveJoinFields = async (adapter, collection, docs, depth, joins) => {
                 continue;
             }
             const targetTable = escapeIdent(targetCollection.replaceAll('-', '_'));
+            const collectionWhere = filterJoinWhereForCollection(joinWhere, targetCollection);
+            const whereSQL = buildWhere(collectionWhere, getCollectionConfig(adapter, targetCollection)?.fields);
             const targetDocs = normalizeFetchedDocs(await adapter.client.query(`SELECT * FROM ${targetTable} ${whereSQL} ${sort};`));
             const populatedTargets = depth > 0 ? await transformRelationshipReads(adapter, targetCollection, targetDocs, depth - 1) : targetDocs;
             for (const [index, targetDoc] of targetDocs.entries()) {
