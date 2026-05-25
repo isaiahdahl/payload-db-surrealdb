@@ -47,6 +47,10 @@ run_suite() {
     --data 'REMOVE DATABASE payload;' \
     http://localhost:8000/sql >/dev/null || true
 
+  if [ "$name" = "uploads" ]; then
+    git -C "$PAYLOAD" clean -fdX test/uploads >/dev/null 2>&1 || true
+  fi
+
   cd "$PAYLOAD"
   set +e
   PAYLOAD_DATABASE=surrealdb corepack pnpm exec vitest --run --project int "$suite" >"$out" 2>&1
