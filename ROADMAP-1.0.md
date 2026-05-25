@@ -91,9 +91,9 @@ Current relationships status: `test/relationships/int.spec.ts` is green at 57 pa
 
 Current dataloader status: `test/dataloader/int.spec.ts` is green at 4 passed.
 
-Current joins status: `test/joins/int.spec.ts` now gets through setup and is partially passing at 50 passed / 1 skipped / 24 failed. Remaining failures are join where filters, localized/versioned joins, access filtering, pagination, and collection-array sorting/query result shape.
+Current joins status: `test/joins/int.spec.ts` now gets through setup and is partially passing at 49 passed / 1 skipped / 25 failed in the latest full 1.0 autoresearch sweep. Remaining failures are join where filters, localized/versioned joins, access filtering, pagination, and collection-array sorting/query result shape.
 
-Current uploads status: 100/102 passing after adapter fixes for upload cookie-fetch isolation and localized upload relationships in blocks. The two remaining local failures are environment-sensitive paste-url checks caused by nginx responding on `127.0.0.1:80` / `localhost:80` with 404 where the suite expects a failed/blocked fetch status of 500.
+Current uploads status: 99/102 passing in the latest full 1.0 autoresearch sweep. The paste-url localhost checks remain environment-sensitive because nginx responds on `127.0.0.1:80` / `localhost:80` with 404 where the suite expects a failed/blocked fetch status of 500; one filename-collision failure remains under investigation.
 
 Must support:
 
@@ -117,7 +117,7 @@ PAYLOAD_DATABASE=surrealdb pnpm test:int test/locked-documents/int.spec.ts
 PAYLOAD_DATABASE=surrealdb pnpm test:int test/queues/int.spec.ts
 ```
 
-Current status: `test/versions/int.spec.ts` is green at 98 passed, `test/localization/int.spec.ts` is green at 117 passed, `test/locked-documents/int.spec.ts` is green at 13 passed, and `test/trash/int.spec.ts` is green at 97 passed / 5 todo. `test/queues/int.spec.ts` currently fails broadly (72 failed / 2 skipped), starting with duplicate user seeding / queue concurrency behavior.
+Current status: `test/versions/int.spec.ts` is green at 98 passed, `test/localization/int.spec.ts` is green at 117 passed, `test/locked-documents/int.spec.ts` is green at 13 passed, and `test/trash/int.spec.ts` is green at 97 passed / 5 todo. `test/queues/int.spec.ts` improved substantially to 61 passed / 2 skipped / 11 failed after adding reset/snapshot-compatible adapter shims; remaining failures are true queue retry/cancel/parallel/concurrency edge cases.
 
 Must support:
 
