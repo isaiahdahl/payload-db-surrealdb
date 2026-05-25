@@ -385,6 +385,8 @@ const resolveJoinFields = async (adapter, collection, docs, depth, joins) => {
             continue;
         }
         const limit = joinOptions?.limit ?? field.limit ?? field.defaultLimit ?? 10;
+        const page = Math.max(1, Number(joinOptions && 'page' in joinOptions ? joinOptions.page : 1) || 1);
+        const start = limit > 0 ? (page - 1) * limit : 0;
         const collections = Array.isArray(field.collection) ? field.collection : [field.collection];
         const sort = getSortSQL(joinOptions?.sort ?? field.sort ?? field.defaultSort);
         const byParent = new Map();
@@ -412,17 +414,17 @@ const resolveJoinFields = async (adapter, collection, docs, depth, joins) => {
         }
         for (const doc of docs) {
             const joined = sortJoinDocs(byParent.get(String(doc.id)) ?? [], joinOptions?.sort ?? field.sort ?? field.defaultSort);
-            const pageDocs = limit > 0 ? joined.slice(0, limit) : joined;
+            const pageDocs = limit > 0 ? joined.slice(start, start + limit) : joined;
             const exposedDocs = field.orderable ? pageDocs.map((pageDoc) => pageDoc.id) : pageDocs;
             const value = field.hasMany === false
                 ? (exposedDocs[0] ?? null)
                 : {
                     docs: exposedDocs,
-                    hasNextPage: limit > 0 ? joined.length > limit : false,
-                    hasPrevPage: false,
+                    hasNextPage: limit > 0 ? page * limit < joined.length : false,
+                    hasPrevPage: page > 1,
                     limit,
-                    page: 1,
-                    pagingCounter: 1,
+                    page,
+                    pagingCounter: joined.length > 0 ? start + 1 : 0,
                     totalDocs: joined.length,
                     totalPages: limit > 0 ? Math.ceil(joined.length / limit) : 1,
                 };
