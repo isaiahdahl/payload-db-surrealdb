@@ -388,6 +388,8 @@ const resolveJoinFields = async (adapter, collection, docs, depth, joins) => {
         const page = Math.max(1, Number(joinOptions && 'page' in joinOptions ? joinOptions.page : 1) || 1);
         const start = limit > 0 ? (page - 1) * limit : 0;
         const collections = Array.isArray(field.collection) ? field.collection : [field.collection];
+        const joinWhere = joinOptions && 'where' in joinOptions ? joinOptions.where : field.where;
+        const whereSQL = buildWhere(joinWhere, getCollectionConfig(adapter, collections[0] ?? '')?.fields);
         const sort = getSortSQL(joinOptions?.sort ?? field.sort ?? field.defaultSort);
         const byParent = new Map();
         for (const targetCollection of collections) {
@@ -395,7 +397,7 @@ const resolveJoinFields = async (adapter, collection, docs, depth, joins) => {
                 continue;
             }
             const targetTable = escapeIdent(targetCollection.replaceAll('-', '_'));
-            const targetDocs = normalizeFetchedDocs(await adapter.client.query(`SELECT * FROM ${targetTable} ${sort};`));
+            const targetDocs = normalizeFetchedDocs(await adapter.client.query(`SELECT * FROM ${targetTable} ${whereSQL} ${sort};`));
             const populatedTargets = depth > 0 ? await transformRelationshipReads(adapter, targetCollection, targetDocs, depth - 1) : targetDocs;
             for (const [index, targetDoc] of targetDocs.entries()) {
                 const foreignValue = getValueAtPath(targetDoc, field.on);

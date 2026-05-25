@@ -16,6 +16,7 @@ type Field = {
     relationTo?: string | string[];
     sort?: string | string[];
     defaultSort?: string | string[];
+    where?: unknown;
     tabs?: Array<{
         fields?: Field[];
         localized?: boolean;

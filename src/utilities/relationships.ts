@@ -21,6 +21,7 @@ type Field = {
   relationTo?: string | string[]
   sort?: string | string[]
   defaultSort?: string | string[]
+  where?: unknown
   tabs?: Array<{
     fields?: Field[]
     localized?: boolean
@@ -549,6 +550,8 @@ const resolveJoinFields = async (
     const page = Math.max(1, Number(joinOptions && 'page' in joinOptions ? joinOptions.page : 1) || 1)
     const start = limit > 0 ? (page - 1) * limit : 0
     const collections = Array.isArray(field.collection) ? field.collection : [field.collection]
+    const joinWhere = joinOptions && 'where' in joinOptions ? joinOptions.where : field.where
+    const whereSQL = buildWhere(joinWhere as never, getCollectionConfig(adapter, collections[0] ?? '')?.fields)
     const sort = getSortSQL(joinOptions?.sort ?? field.sort ?? field.defaultSort)
     const byParent = new Map<string, Record<string, unknown>[]>()
 
@@ -560,7 +563,7 @@ const resolveJoinFields = async (
       const targetTable = escapeIdent(targetCollection.replaceAll('-', '_'))
       const targetDocs = normalizeFetchedDocs(
         await adapter.client.query(
-          `SELECT * FROM ${targetTable} ${sort};`,
+          `SELECT * FROM ${targetTable} ${whereSQL} ${sort};`,
         ) as Record<string, unknown>[],
       )
       const populatedTargets = depth > 0 ? await transformRelationshipReads(adapter, targetCollection, targetDocs, depth - 1) : targetDocs
