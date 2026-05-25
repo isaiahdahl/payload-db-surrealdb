@@ -3,14 +3,17 @@
 ## Objective
 Move `payload-db-surrealdb` toward a credible 1.0 by reducing objective failures in Payload's official integration suites. The immediate 1.0 blockers are joins and queues; query-presets and trash are now green and should remain green.
 
-The workload builds the adapter, resets the local SurrealDB `payload` database before each suite, then runs the remaining official suites that best represent 1.0 readiness:
+The workload builds the adapter, resets the local SurrealDB `payload` database before each suite, then runs the official suites that currently define the remaining objective 1.0 gap and regression guardrail:
 
-1. `test/joins/int.spec.ts`
-2. `test/queues/int.spec.ts`
+1. `test/query-presets/int.spec.ts` — should stay green.
+2. `test/trash/int.spec.ts` — should stay green.
+3. `test/uploads/int.spec.ts` — mostly green; known local env may contribute two paste-url failures.
+4. `test/joins/int.spec.ts` — major remaining adapter blocker.
+5. `test/queues/int.spec.ts` — major remaining adapter blocker.
 
 ## Metrics
-- **Primary**: `blocker_failures` (count, lower is better) — failing tests across the current 1.0 blocker suites.
-- **Secondary**: `joins_failures`, `joins_passed`, `queues_failures`, `queues_passed`, `duration_s`, `build_ok` — localize progress and monitor runtime.
+- **Primary**: `blocker_failures` (count, lower is better) — failing tests across the 1.0 objective sweep.
+- **Secondary**: `query_presets_failures`, `trash_failures`, `uploads_failures`, `joins_failures`, `queues_failures`, matching passed counts, `duration_s`, `build_ok` — localize progress and monitor runtime.
 
 ## How to Run
 `./autoresearch.sh` — outputs `METRIC name=number` lines.
@@ -67,3 +70,4 @@ test/versions/int.spec.ts        98 passed
 - Started collection-array join shape: docs now use `{ relationTo, value }`; default ordering across collections was adjusted. Sorting/pagination for collection-array joins still needs work because Payload's sanitized joins passed to the adapter often omit requested sort/limit in Local API paths.
 - Remaining joins failures cluster around REST/GraphQL join pagination/access/query handling, localized/versioned joins, access filtering, collection-array sorting/filtering, and top-level where queries by join fields that currently time out.
 - Queues are the next large 1.0 blocker after joins; expected areas include duplicate user seeding, job claiming/updateJobs, concurrency, and queue state transitions.
+- Full 1.0 rubric is not “just joins”: use whatever suite gives the most objective reduction in remaining 1.0 risk. Keep green suites green, reduce blocker failures, and update the roadmap when a suite crosses from failing to green.

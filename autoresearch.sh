@@ -19,6 +19,12 @@ else
   build_ok=0
   cat /tmp/payload-surrealdb-build.log >&2 || true
   echo "METRIC blocker_failures=999"
+  echo "METRIC query_presets_failures=999"
+  echo "METRIC query_presets_passed=0"
+  echo "METRIC trash_failures=999"
+  echo "METRIC trash_passed=0"
+  echo "METRIC uploads_failures=999"
+  echo "METRIC uploads_passed=0"
   echo "METRIC joins_failures=999"
   echo "METRIC joins_passed=0"
   echo "METRIC queues_failures=999"
@@ -75,10 +81,13 @@ PY
   echo "$failed $passed"
 }
 
+read query_presets_failures query_presets_passed < <(run_suite "test/query-presets/int.spec.ts" "query-presets")
+read trash_failures trash_passed < <(run_suite "test/trash/int.spec.ts" "trash")
+read uploads_failures uploads_passed < <(run_suite "test/uploads/int.spec.ts" "uploads")
 read joins_failures joins_passed < <(run_suite "test/joins/int.spec.ts" "joins")
 read queues_failures queues_passed < <(run_suite "test/queues/int.spec.ts" "queues")
 
-blocker_failures=$((joins_failures + queues_failures))
+blocker_failures=$((query_presets_failures + trash_failures + uploads_failures + joins_failures + queues_failures))
 end=$(python3 - <<'PY'
 import time
 print(time.time())
@@ -91,6 +100,12 @@ PY
 )
 
 echo "METRIC blocker_failures=$blocker_failures"
+echo "METRIC query_presets_failures=$query_presets_failures"
+echo "METRIC query_presets_passed=$query_presets_passed"
+echo "METRIC trash_failures=$trash_failures"
+echo "METRIC trash_passed=$trash_passed"
+echo "METRIC uploads_failures=$uploads_failures"
+echo "METRIC uploads_passed=$uploads_passed"
 echo "METRIC joins_failures=$joins_failures"
 echo "METRIC joins_passed=$joins_passed"
 echo "METRIC queues_failures=$queues_failures"
