@@ -64,7 +64,7 @@ const refreshDrizzleShim = (adapter) => {
 };
 const normalizeOrderableJoinLocalization = (fields = []) => {
     for (const field of fields) {
-        if (field?.type === 'join' && field.orderable)
+        if (field?.type === 'join')
             field.localized = false;
         if (field?.fields)
             normalizeOrderableJoinLocalization(field.fields);
