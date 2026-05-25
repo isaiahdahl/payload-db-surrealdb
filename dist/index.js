@@ -5,7 +5,7 @@ import { count, create, deleteMany, deleteOne, find, findOne, updateMany, update
 import { beginTransaction, commitTransaction, rollbackTransaction } from './transactions/index.js';
 import { getCollectionConfig, getIndexedFields } from './utilities/fields.js';
 import { transformRelationshipReads } from './utilities/relationships.js';
-import { escapeIdent, getRecordID, getTableName, literal } from './utilities/sql.js';
+import { escapeIdent, getRecordID, getTableName, literal, normalizeDocument } from './utilities/sql.js';
 import { countGlobalVersions, countVersions, createGlobalVersion, createVersion, deleteVersions, findGlobalVersions, findVersions, queryDrafts, updateGlobalVersion, updateVersion, } from './versions.js';
 const createAdapter = (args) => ({
     bulkOperationsSingleTransaction: false,
@@ -42,7 +42,8 @@ const refreshDrizzleShim = (adapter) => {
     adapter.drizzle.query = query;
     adapter.drizzle.select = () => ({
         from: (table) => ({
-            execute: async () => adapter.client.query(`SELECT * FROM ${escapeIdent(table.dbName ?? '')};`),
+            execute: async () => (await adapter.client.query(`SELECT * FROM ${escapeIdent(table.dbName ?? '')};`))
+                .map((record) => normalizeDocument(record)),
         }),
     });
     adapter.drizzle.insert = (table) => ({

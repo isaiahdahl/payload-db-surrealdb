@@ -27,7 +27,7 @@ import {
 import { beginTransaction, commitTransaction, rollbackTransaction } from './transactions/index.js'
 import { getCollectionConfig, getIndexedFields, getValueAtPath } from './utilities/fields.js'
 import { transformRelationshipReads } from './utilities/relationships.js'
-import { escapeIdent, getRecordID, getTableName, literal } from './utilities/sql.js'
+import { escapeIdent, getRecordID, getTableName, literal, normalizeDocument } from './utilities/sql.js'
 import {
   countGlobalVersions,
   countVersions,
@@ -115,7 +115,8 @@ const refreshDrizzleShim = (adapter: SurrealAdapter): void => {
   ;(adapter as any).drizzle.query = query
   ;(adapter as any).drizzle.select = () => ({
     from: (table: { dbName?: string }) => ({
-      execute: async () => adapter.client.query(`SELECT * FROM ${escapeIdent(table.dbName ?? '')};`),
+      execute: async () => (await adapter.client.query<Record<string, unknown>[]>(`SELECT * FROM ${escapeIdent(table.dbName ?? '')};`))
+        .map((record) => normalizeDocument(record)),
     }),
   })
   ;(adapter as any).drizzle.insert = (table: { dbName?: string }) => ({
