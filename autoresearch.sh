@@ -55,8 +55,10 @@ run_suite() {
   echo "===== $suite tail =====" >&2
   tail -80 "$out" >&2 || true
 
-  local summary
-  summary=$(grep -E "Tests  +" "$out" | tail -1 || true)
+  local clean_out summary
+  clean_out="$out.clean"
+  perl -pe 's/\x1b\[[0-9;?]*[ -\/]*[@-~]//g' "$out" > "$clean_out" || cp "$out" "$clean_out"
+  summary=$(grep -E "Tests  +" "$clean_out" | tail -1 || true)
   local failed passed
   failed=$(python3 - "$summary" "$status" <<'PY'
 import re, sys
