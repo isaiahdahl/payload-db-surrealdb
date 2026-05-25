@@ -27,7 +27,7 @@ import {
 import { beginTransaction, commitTransaction, rollbackTransaction } from './transactions/index.js'
 import { getCollectionConfig, getIndexedFields, getValueAtPath } from './utilities/fields.js'
 import { transformRelationshipReads } from './utilities/relationships.js'
-import { escapeIdent, getTableName } from './utilities/sql.js'
+import { escapeIdent, getRecordID, getTableName, literal } from './utilities/sql.js'
 import {
   countGlobalVersions,
   countVersions,
@@ -99,6 +99,39 @@ const buildIndexStatements = (table: string, fields: ReturnType<typeof getIndexe
     const unique = field.unique ? ' UNIQUE' : ''
 
     return `DEFINE INDEX IF NOT EXISTS ${escapeIdent(getIndexName(table, field.name, field.unique))} ON TABLE ${escapeIdent(table)} FIELDS ${escapeIdent(field.name)}${unique};`
+  })
+}
+
+const refreshDrizzleShim = (adapter: SurrealAdapter): void => {
+  const schema = Object.fromEntries(
+    Object.keys(adapter.tables ?? {}).map((table) => [table, { dbName: table }]),
+  )
+  const query = Object.fromEntries(
+    Object.entries(schema).map(([table, ref]) => [table, { fullSchema: { [table]: ref } }]),
+  )
+
+  ;(adapter as any).drizzle ??= {}
+  ;(adapter as any).drizzle._ = { schema }
+  ;(adapter as any).drizzle.query = query
+  ;(adapter as any).drizzle.select = () => ({
+    from: (table: { dbName?: string }) => ({
+      execute: async () => adapter.client.query(`SELECT * FROM ${escapeIdent(table.dbName ?? '')};`),
+    }),
+  })
+  ;(adapter as any).drizzle.insert = (table: { dbName?: string }) => ({
+    values: (records: Record<string, unknown>[]) => ({
+      execute: async () => {
+        for (const record of records) {
+          const id = record.id
+          const data = { ...record }
+          delete (data as any).id
+          const target = id === undefined
+            ? escapeIdent(table.dbName ?? '')
+            : getRecordID(table.dbName ?? '', String(id))
+          await adapter.client.query(`CREATE ${target} CONTENT ${literal(data)} RETURN NONE;`)
+        }
+      },
+    }),
   })
 }
 
@@ -179,8 +212,15 @@ const init: NonNullable<BaseDatabaseAdapter['init']> = async function init(this:
   }
 
   for (const table of systemTables) {
-    statements.push(defineTable(getTableName(table, this.tablePrefix)))
+    const tableName = getTableName(table, this.tablePrefix)
+    this.tables[tableName] ??= {}
   }
+
+  for (const table of Object.keys(this.tables)) {
+    statements.push(defineTable(table))
+  }
+
+  refreshDrizzleShim(this)
 
   await this.client.query(statements.join('\n'))
 }
@@ -417,8 +457,15 @@ const findDistinct: FindDistinct = async function findDistinct(this: SurrealAdap
   }
 }
 
-const execute = async function execute(this: SurrealAdapter, args: { raw?: string }) {
+const execute = async function execute(this: SurrealAdapter, args: { raw?: string; sql?: unknown }) {
   const raw = args.raw ?? ''
+
+  if (/DELETE FROM /i.test(raw)) {
+    const statements = [...raw.matchAll(/DELETE FROM\s+([A-Za-z_][A-Za-z0-9_]*)/gi)]
+      .map((match) => `DELETE ${escapeIdent(match[1]!)};`)
+    if (statements.length) await this.client.query(statements.join('\n'))
+    return { rows: [] }
+  }
 
   if (/SELECT \* from places/i.test(raw)) {
     const rows = await this.client.query<Record<string, unknown>[]>(`SELECT * FROM ${escapeIdent(getTableName('places', this.tablePrefix))};`)
