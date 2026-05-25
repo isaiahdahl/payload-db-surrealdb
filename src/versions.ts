@@ -14,6 +14,7 @@ import type {
 import type { SurrealAdapter } from './index.js'
 
 import { count, create, deleteMany, find, updateOne } from './operations.js'
+import { transformRelationshipReads } from './utilities/relationships.js'
 import { escapeIdent, getTableName, literal } from './utilities/sql.js'
 
 const versionCollection = (slug: string): string => `${slug}_versions`
@@ -236,7 +237,8 @@ export const queryDrafts: QueryDrafts = async function queryDrafts(this: Surreal
     where: { and: [{ latest: { equals: true } }, draftWhere(args.where ?? {})] },
   })
 
-  const docs = result.docs.map((doc) => toDraftDoc(doc as Record<string, unknown>)).filter(Boolean)
+  const docs = result.docs.map((doc) => toDraftDoc(doc as Record<string, unknown>)).filter(Boolean) as Record<string, unknown>[]
+  await transformRelationshipReads(this, args.collection, docs, typeof (args as Record<string, unknown>).depth === 'number' ? (args as Record<string, unknown>).depth as number : 0, args.joins as never)
 
   return {
     ...result,

@@ -1,4 +1,5 @@
 import { count, create, deleteMany, find, updateOne } from './operations.js';
+import { transformRelationshipReads } from './utilities/relationships.js';
 import { escapeIdent, getTableName, literal } from './utilities/sql.js';
 const versionCollection = (slug) => `${slug}_versions`;
 const globalVersionCollection = (slug) => `global_${slug}_versions`;
@@ -182,6 +183,7 @@ export const queryDrafts = async function queryDrafts(args) {
         where: { and: [{ latest: { equals: true } }, draftWhere(args.where ?? {})] },
     });
     const docs = result.docs.map((doc) => toDraftDoc(doc)).filter(Boolean);
+    await transformRelationshipReads(this, args.collection, docs, typeof args.depth === 'number' ? args.depth : 0, args.joins);
     return {
         ...result,
         docs,
