@@ -235,6 +235,25 @@ const resolveLocaleValue = (value, locale) => {
     }
     return value;
 };
+const payloadJobUpdateLocks = new Map();
+const withPayloadJobUpdateLock = async (id, operation) => {
+    const previous = payloadJobUpdateLocks.get(id) ?? Promise.resolve();
+    let release;
+    const current = new Promise((resolve) => {
+        release = resolve;
+    });
+    payloadJobUpdateLocks.set(id, previous.then(() => current, () => current));
+    await previous.catch(() => undefined);
+    try {
+        return await operation();
+    }
+    finally {
+        release();
+        if (payloadJobUpdateLocks.get(id) === current) {
+            payloadJobUpdateLocks.delete(id);
+        }
+    }
+};
 const unsafeJSONValue = /select\(|["'\\=]/i;
 const assertSafeClientQueryValue = (key, value) => {
     if (key.startsWith('json.') && typeof value === 'string' && unsafeJSONValue.test(value)) {
@@ -994,6 +1013,9 @@ export const count = async function count(args) {
     }
 };
 export const updateOne = async function updateOne(args) {
+    if (args.collection === 'payload-jobs' && args.id && !args.__payloadJobUpdateLock) {
+        return withPayloadJobUpdateLock(String(args.id), () => updateOne.call(this, { ...args, __payloadJobUpdateLock: true }));
+    }
     const collectionConfig = getCollectionConfig(this, args.collection);
     const table = getTableName(args.collection, this.tablePrefix);
     const dottedData = Object.fromEntries(Object.entries(args.data).filter(([key]) => key.includes('.')));

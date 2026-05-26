@@ -276,6 +276,28 @@ const resolveLocaleValue = (value: unknown, locale?: unknown): unknown => {
   return value
 }
 
+const payloadJobUpdateLocks = new Map<string, Promise<void>>()
+
+const withPayloadJobUpdateLock = async <T>(id: string, operation: () => Promise<T>): Promise<T> => {
+  const previous = payloadJobUpdateLocks.get(id) ?? Promise.resolve()
+  let release!: () => void
+  const current = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  payloadJobUpdateLocks.set(id, previous.then(() => current, () => current))
+
+  await previous.catch(() => undefined)
+
+  try {
+    return await operation()
+  } finally {
+    release()
+    if (payloadJobUpdateLocks.get(id) === current) {
+      payloadJobUpdateLocks.delete(id)
+    }
+  }
+}
+
 const unsafeJSONValue = /select\(|["'\\=]/i
 
 const assertSafeClientQueryValue = (key: string, value: unknown): void => {
@@ -1129,6 +1151,10 @@ export const count: Count = async function count(this: SurrealAdapter, args) {
 }
 
 export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapter, args) {
+  if (args.collection === 'payload-jobs' && args.id && !(args as Record<string, unknown>).__payloadJobUpdateLock) {
+    return withPayloadJobUpdateLock(String(args.id), () => updateOne.call(this, { ...args, __payloadJobUpdateLock: true } as never)) as never
+  }
+
   const collectionConfig = getCollectionConfig(this, args.collection)
   const table = getTableName(args.collection, this.tablePrefix)
   const dottedData = Object.fromEntries(Object.entries(args.data).filter(([key]) => key.includes('.')))
