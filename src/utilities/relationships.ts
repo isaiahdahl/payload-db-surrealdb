@@ -213,8 +213,10 @@ const sortJoinDocs = (docs: Record<string, unknown>[], sort?: string | string[])
   const values = sortValues(sort).length ? sortValues(sort) : ['-createdAt']
 
   return [...docs].sort((a, b) => {
+    let lastDirection = 1
     for (const sortValue of values) {
       const direction = sortValue.startsWith('-') ? -1 : 1
+      lastDirection = direction
       const path = sortValue.replace(/^-|^\+/, '')
       const aValue = getValueAtPath('value' in a && 'relationTo' in a ? a.value as Record<string, unknown> : a, path)
       const bValue = getValueAtPath('value' in b && 'relationTo' in b ? b.value as Record<string, unknown> : b, path)
@@ -222,7 +224,7 @@ const sortJoinDocs = (docs: Record<string, unknown>[], sort?: string | string[])
       if (result !== 0) return direction * result
     }
 
-    if ('relationTo' in a && 'relationTo' in b) return compareValues(b.relationTo, a.relationTo)
+    if ('relationTo' in a && 'relationTo' in b) return lastDirection * compareValues(a.relationTo, b.relationTo)
 
     return 0
   })

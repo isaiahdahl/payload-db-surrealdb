@@ -144,8 +144,10 @@ const compareValues = (a, b) => {
 const sortJoinDocs = (docs, sort) => {
     const values = sortValues(sort).length ? sortValues(sort) : ['-createdAt'];
     return [...docs].sort((a, b) => {
+        let lastDirection = 1;
         for (const sortValue of values) {
             const direction = sortValue.startsWith('-') ? -1 : 1;
+            lastDirection = direction;
             const path = sortValue.replace(/^-|^\+/, '');
             const aValue = getValueAtPath('value' in a && 'relationTo' in a ? a.value : a, path);
             const bValue = getValueAtPath('value' in b && 'relationTo' in b ? b.value : b, path);
@@ -154,7 +156,7 @@ const sortJoinDocs = (docs, sort) => {
                 return direction * result;
         }
         if ('relationTo' in a && 'relationTo' in b)
-            return compareValues(b.relationTo, a.relationTo);
+            return lastDirection * compareValues(a.relationTo, b.relationTo);
         return 0;
     });
 };
