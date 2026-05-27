@@ -891,7 +891,12 @@ export const findOne = (async function findOne(args) {
     const where = buildRelationshipAwareWhere(this, args.collection, args.where);
     try {
         const result = await this.client.query(`SELECT * FROM ${table} ${where} LIMIT 1;`);
-        const docs = applyReadTransforms(this, args.collection, normalizeDocs(result), args.locale, !args.draftsEnabled);
+        const transactionDocs = await getTransactionDocs(this, args.req, args.collection);
+        const mergedDocs = mergeTransactionDocs(normalizeDocs(result), transactionDocs);
+        const matchingDocs = transactionDocs.length
+            ? mergedDocs.filter((doc) => docMatchesWhere(this, args.collection, doc, args.where, args.locale)).slice(0, 1)
+            : mergedDocs;
+        const docs = applyReadTransforms(this, args.collection, matchingDocs, args.locale, !args.draftsEnabled);
         const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args), args.joins);
         return applySelect(populated[0] ?? null, args.select);
     }

@@ -1009,7 +1009,12 @@ export const findOne: FindOne = (async function findOne(this: SurrealAdapter, ar
 
   try {
     const result = await this.client.query<Record<string, unknown>[]>(`SELECT * FROM ${table} ${where} LIMIT 1;`)
-    const docs = applyReadTransforms(this, args.collection, normalizeDocs(result) as Record<string, unknown>[], args.locale, !(args as Record<string, unknown>).draftsEnabled)
+    const transactionDocs = await getTransactionDocs(this, args.req, args.collection)
+    const mergedDocs = mergeTransactionDocs(normalizeDocs(result) as Record<string, unknown>[], transactionDocs)
+    const matchingDocs = transactionDocs.length
+      ? mergedDocs.filter((doc) => docMatchesWhere(this, args.collection, doc, args.where, args.locale)).slice(0, 1)
+      : mergedDocs
+    const docs = applyReadTransforms(this, args.collection, matchingDocs, args.locale, !(args as Record<string, unknown>).draftsEnabled)
     const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
 
     return applySelect(populated[0] ?? null, args.select)
