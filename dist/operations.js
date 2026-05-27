@@ -386,6 +386,34 @@ const pathRootField = (adapter, collection, path) => {
     const root = path.replaceAll('__', '.').split('.')[0];
     return getCollectionConfig(adapter, collection)?.fields?.find((item) => item.name === root);
 };
+const pathContainsJoinField = (adapter, collection, path) => {
+    const parts = path.replaceAll('__', '.').split('.').filter(Boolean);
+    let fields = getCollectionConfig(adapter, collection)?.fields ?? [];
+    for (const part of parts) {
+        const field = fields.find((item) => item.name === part);
+        if (!field)
+            return false;
+        if (field.type === 'join')
+            return true;
+        if (field.type === 'tabs')
+            fields = (field.tabs ?? []).flatMap((tab) => tab.fields ?? []);
+        else if (field.type === 'blocks')
+            fields = (field.blocks ?? []).flatMap((block) => block.fields ?? []);
+        else
+            fields = field.fields ?? [];
+    }
+    return false;
+};
+const whereUsesJoinField = (adapter, collection, where) => {
+    if (!where || typeof where !== 'object' || Array.isArray(where))
+        return false;
+    return Object.entries(where).some(([key, value]) => {
+        const normalizedKey = key.toLowerCase();
+        if ((normalizedKey === 'and' || normalizedKey === 'or') && Array.isArray(value))
+            return value.some((entry) => whereUsesJoinField(adapter, collection, entry));
+        return pathContainsJoinField(adapter, collection, key);
+    });
+};
 const whereUsesLocalizedFields = (adapter, collection, where) => {
     if (!where || typeof where !== 'object' || Array.isArray(where))
         return false;
@@ -944,8 +972,9 @@ export const find = async function find(args) {
     let normalized = needsClientVirtualHandling
         ? baseDocs
         : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args), args.joins);
+    const clientVirtualDepth = whereUsesJoinField(this, args.collection, args.where) ? 1 : 2;
     let workingDocs = needsClientVirtualHandling
-        ? await transformRelationshipReads(this, args.collection, structuredClone(baseDocs), Math.max(getDepth(args), 2), args.joins)
+        ? await transformRelationshipReads(this, args.collection, structuredClone(baseDocs), Math.max(getDepth(args), clientVirtualDepth), args.joins)
         : normalized;
     let workingIndexes = workingDocs.map((_, index) => index);
     if (useClientVirtuals) {

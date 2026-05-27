@@ -451,6 +451,32 @@ const pathRootField = (adapter: SurrealAdapter, collection: string, path: string
   return getCollectionConfig(adapter, collection)?.fields?.find((item: { name?: string }) => item.name === root)
 }
 
+const pathContainsJoinField = (adapter: SurrealAdapter, collection: string, path: string): boolean => {
+  const parts = path.replaceAll('__', '.').split('.').filter(Boolean)
+  let fields = getCollectionConfig(adapter, collection)?.fields ?? []
+
+  for (const part of parts) {
+    const field = fields.find((item: { name?: string }) => item.name === part) as any
+    if (!field) return false
+    if (field.type === 'join') return true
+
+    if (field.type === 'tabs') fields = (field.tabs ?? []).flatMap((tab: any) => tab.fields ?? [])
+    else if (field.type === 'blocks') fields = (field.blocks ?? []).flatMap((block: any) => block.fields ?? [])
+    else fields = field.fields ?? []
+  }
+
+  return false
+}
+
+const whereUsesJoinField = (adapter: SurrealAdapter, collection: string, where: unknown): boolean => {
+  if (!where || typeof where !== 'object' || Array.isArray(where)) return false
+  return Object.entries(where as Record<string, unknown>).some(([key, value]) => {
+    const normalizedKey = key.toLowerCase()
+    if ((normalizedKey === 'and' || normalizedKey === 'or') && Array.isArray(value)) return value.some((entry) => whereUsesJoinField(adapter, collection, entry))
+    return pathContainsJoinField(adapter, collection, key)
+  })
+}
+
 const whereUsesLocalizedFields = (adapter: SurrealAdapter, collection: string, where: unknown): boolean => {
   if (!where || typeof where !== 'object' || Array.isArray(where)) return false
   return Object.entries(where as Record<string, unknown>).some(([key, value]) => {
@@ -1068,8 +1094,9 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
   let normalized = needsClientVirtualHandling
     ? baseDocs
     : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
+  const clientVirtualDepth = whereUsesJoinField(this, args.collection, args.where) ? 1 : 2
   let workingDocs = needsClientVirtualHandling
-    ? await transformRelationshipReads(this, args.collection, structuredClone(baseDocs), Math.max(getDepth(args as never), 2), (args as Record<string, unknown>).joins as never)
+    ? await transformRelationshipReads(this, args.collection, structuredClone(baseDocs), Math.max(getDepth(args as never), clientVirtualDepth), (args as Record<string, unknown>).joins as never)
     : normalized
   let workingIndexes = workingDocs.map((_, index) => index)
 
