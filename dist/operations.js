@@ -4,6 +4,7 @@ import { pathToSQL } from './queries/buildWhere.js';
 import { getAtomicValueAtPath, removeDottedOperatorKeys, setAtomicValueAtPath } from './utilities/atomicUpdate.js';
 import { addTransactionDeletedDocs, addTransactionDoc, getTransactionDeletedIDs, getTransactionDocs, queueTransactionStatement } from './transactions/index.js';
 import { applyDefaults, applySelect, getCollectionConfig, getValueAtPath, hasTimestamps } from './utilities/fields.js';
+import { getPagination } from './utilities/pagination.js';
 import { buildRelationshipAwareWhere, transformRelationshipReads, transformRelationshipWrites } from './utilities/relationships.js';
 import { escapeIdent, getRecordID, getTableName, literal, normalizeDocument } from './utilities/sql.js';
 const randomID = () => {
@@ -292,13 +293,6 @@ const mergeTransactionDocs = (docs, transactionDocs, deletedIDs = []) => {
         return visibleDocs;
     const transactionIDs = new Set(transactionDocs.map((doc) => doc.id));
     return [...visibleDocs.filter((doc) => !transactionIDs.has(doc.id)), ...transactionDocs];
-};
-const getPagination = (args) => {
-    const limit = Number(args.limit ?? 0);
-    const page = Number(args.page ?? 1);
-    const start = Number(args.skip ?? Math.max(page - 1, 0) * (limit > 0 ? limit : 0));
-    const currentPage = args.skip !== undefined && limit > 0 ? Math.floor(start / limit) + 1 : page;
-    return { currentPage, limit, start };
 };
 const mapWriteError = (adapter, collection, error) => {
     const message = error instanceof Error ? error.message : String(error);
