@@ -351,18 +351,40 @@ const populateRelationshipFields = async (adapter, collection, docs, depth) => {
     };
     await populateFields(docs, getCollectionConfig(adapter, collection)?.fields);
 };
-const getValueAtPath = (value, path) => {
+const getLocaleCodes = (adapter) => {
+    const localization = adapter.payload.config.localization;
+    const locales = typeof localization === 'object' && Array.isArray(localization.locales) ? localization.locales : [];
+    return locales.map((locale) => typeof locale === 'string' ? locale : locale.code).filter(Boolean);
+};
+const getDefaultLocale = (adapter) => {
+    const localization = adapter.payload.config.localization;
+    return typeof localization === 'object' ? localization.defaultLocale : undefined;
+};
+const pickLocaleWrapperValue = (value, localeCodes, defaultLocale) => {
+    if (!localeCodes.some((locale) => locale in value))
+        return undefined;
+    if (defaultLocale && defaultLocale in value)
+        return value[defaultLocale];
+    const first = localeCodes.find((locale) => locale in value);
+    return first ? value[first] : undefined;
+};
+const getValueAtPath = (value, path, localeCodes = [], defaultLocale) => {
     const [head, ...tail] = path.split('.').filter(Boolean);
     if (!head) {
         return value;
     }
     if (Array.isArray(value)) {
-        return value.map((item) => getValueAtPath(item, path));
+        return value.map((item) => getValueAtPath(item, path, localeCodes, defaultLocale));
     }
     if (!isPlainObject(value)) {
         return undefined;
     }
-    return getValueAtPath(value[head], tail.join('.'));
+    if (!(head in value)) {
+        const localeValue = pickLocaleWrapperValue(value, localeCodes, defaultLocale);
+        if (localeValue !== undefined)
+            return getValueAtPath(localeValue, path, localeCodes, defaultLocale);
+    }
+    return getValueAtPath(value[head], tail.join('.'), localeCodes, defaultLocale);
 };
 const setValueAtPath = (doc, path, value) => {
     const parts = path.split('.').filter(Boolean);
@@ -379,15 +401,18 @@ const setValueAtPath = (doc, path, value) => {
     }
     target[last] = value;
 };
-const flattenJoinValues = (value) => {
+const flattenJoinValues = (value, localeCodes = [], defaultLocale) => {
     if (Array.isArray(value)) {
-        return value.flatMap(flattenJoinValues);
+        return value.flatMap((item) => flattenJoinValues(item, localeCodes, defaultLocale));
     }
     if (isPlainObject(value) && 'value' in value) {
-        return flattenJoinValues(value.value);
+        return flattenJoinValues(value.value, localeCodes, defaultLocale);
     }
     if (isPlainObject(value)) {
-        return Object.values(value).flatMap(flattenJoinValues);
+        const localeValue = pickLocaleWrapperValue(value, localeCodes, defaultLocale);
+        return localeValue !== undefined
+            ? flattenJoinValues(localeValue, localeCodes, defaultLocale)
+            : Object.values(value).flatMap((item) => flattenJoinValues(item, localeCodes, defaultLocale));
     }
     return value === null || value === undefined ? [] : [value];
 };
@@ -397,6 +422,8 @@ const resolveJoinFields = async (adapter, collection, docs, depth, joins) => {
     }
     const joinFields = collectJoinFields(getCollectionConfig(adapter, collection)?.fields);
     const parentIDs = docs.map((doc) => doc.id).filter((id) => id !== null && id !== undefined);
+    const localeCodes = getLocaleCodes(adapter);
+    const defaultLocale = getDefaultLocale(adapter);
     for (const field of joinFields) {
         if (!field.name || !field.collection || !field.on || !parentIDs.length) {
             continue;
@@ -422,8 +449,8 @@ const resolveJoinFields = async (adapter, collection, docs, depth, joins) => {
             const targetDocs = normalizeFetchedDocs(await adapter.client.query(`SELECT * FROM ${targetTable} ${whereSQL} ${sort};`));
             const populatedTargets = depth > 0 ? await transformRelationshipReads(adapter, targetCollection, targetDocs, depth - 1) : targetDocs;
             for (const [index, targetDoc] of targetDocs.entries()) {
-                const foreignValue = getValueAtPath(targetDoc, field.on);
-                const ids = flattenJoinValues(foreignValue);
+                const foreignValue = getValueAtPath(targetDoc, field.on, localeCodes, defaultLocale);
+                const ids = flattenJoinValues(foreignValue, localeCodes, defaultLocale);
                 const joinedDoc = Array.isArray(field.collection)
                     ? {
                         relationTo: targetCollection,
