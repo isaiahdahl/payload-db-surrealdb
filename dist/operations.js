@@ -971,7 +971,10 @@ export const find = async function find(args) {
     const transactionDocs = await getTransactionDocs(this, args.req, args.collection);
     const deletedIDs = await getTransactionDeletedIDs(this, args.req, args.collection);
     const mergedDocs = mergeTransactionDocs(normalizeDocs(docs), transactionDocs, deletedIDs);
-    const baseDocs = applyReadTransforms(this, args.collection, mergedDocs, needsClientVirtualHandling ? 'all' : args.locale, !args.draftsEnabled);
+    const visibleDocs = (transactionDocs.length || deletedIDs.length) && !needsClientVirtualHandling
+        ? mergedDocs.filter((doc) => docMatchesWhere(this, args.collection, doc, args.where, args.locale))
+        : mergedDocs;
+    const baseDocs = applyReadTransforms(this, args.collection, visibleDocs, needsClientVirtualHandling ? 'all' : args.locale, !args.draftsEnabled);
     let normalized = needsClientVirtualHandling
         ? baseDocs
         : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args), args.joins);

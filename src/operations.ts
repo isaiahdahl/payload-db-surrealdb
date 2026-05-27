@@ -1094,7 +1094,10 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
   const transactionDocs = await getTransactionDocs(this, args.req, args.collection)
   const deletedIDs = await getTransactionDeletedIDs(this, args.req, args.collection)
   const mergedDocs = mergeTransactionDocs(normalizeDocs(docs) as Record<string, unknown>[], transactionDocs, deletedIDs)
-  const baseDocs = applyReadTransforms(this, args.collection, mergedDocs, needsClientVirtualHandling ? 'all' : args.locale, !(args as Record<string, unknown>).draftsEnabled)
+  const visibleDocs = (transactionDocs.length || deletedIDs.length) && !needsClientVirtualHandling
+    ? mergedDocs.filter((doc) => docMatchesWhere(this, args.collection, doc, args.where, args.locale))
+    : mergedDocs
+  const baseDocs = applyReadTransforms(this, args.collection, visibleDocs, needsClientVirtualHandling ? 'all' : args.locale, !(args as Record<string, unknown>).draftsEnabled)
   let normalized = needsClientVirtualHandling
     ? baseDocs
     : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
