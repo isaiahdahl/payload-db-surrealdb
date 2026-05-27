@@ -4,6 +4,7 @@ import type { SurrealClient, SurrealHTTPResult } from './client.js'
 
 import { createClient, SurrealDBError } from './client.js'
 import { createGlobal, findGlobal, updateGlobal } from './globals.js'
+import { withPayloadJobUpdateLock } from './jobs/updateLock.js'
 import {
   createMigration,
   migrate,
@@ -477,14 +478,14 @@ const execute = async function execute(this: SurrealAdapter, args: { raw?: strin
 }
 
 const updateJobs: UpdateJobs = async function updateJobs(this: SurrealAdapter, args) {
-  return updateMany.call(this, {
+  return withPayloadJobUpdateLock('__updateJobs__', () => updateMany.call(this, {
     collection: 'payload-jobs',
     data: args.data,
     limit: 'limit' in args ? args.limit : undefined,
     req: args.req,
     sort: 'sort' in args ? args.sort : undefined,
     where: 'where' in args ? args.where : { id: { equals: args.id } },
-  }) as never
+  })) as never
 }
 
 export function surrealAdapter(args: SurrealAdapterArgs = {}): DatabaseAdapterObj<SurrealAdapter> {

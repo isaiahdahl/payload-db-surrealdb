@@ -1,5 +1,6 @@
 import { createClient, SurrealDBError } from './client.js';
 import { createGlobal, findGlobal, updateGlobal } from './globals.js';
+import { withPayloadJobUpdateLock } from './jobs/updateLock.js';
 import { createMigration, migrate, migrateDown, migrateFresh, migrateRefresh, migrateReset, migrateStatus, } from './migrations.js';
 import { count, create, deleteMany, deleteOne, find, findOne, updateMany, updateOne, upsert, } from './operations.js';
 import { beginTransaction, commitTransaction, rollbackTransaction } from './transactions/index.js';
@@ -370,14 +371,14 @@ const execute = async function execute(args) {
     return { rows: [] };
 };
 const updateJobs = async function updateJobs(args) {
-    return updateMany.call(this, {
+    return withPayloadJobUpdateLock('__updateJobs__', () => updateMany.call(this, {
         collection: 'payload-jobs',
         data: args.data,
         limit: 'limit' in args ? args.limit : undefined,
         req: args.req,
         sort: 'sort' in args ? args.sort : undefined,
         where: 'where' in args ? args.where : { id: { equals: args.id } },
-    });
+    }));
 };
 export function surrealAdapter(args = {}) {
     function adapter({ payload }) {
