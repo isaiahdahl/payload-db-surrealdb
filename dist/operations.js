@@ -1065,7 +1065,9 @@ export const updateOne = async function updateOne(args) {
         const updateContent = shouldUseContent ? { ...existingDoc, ...data, id: args.id } : data;
         const statement = `UPDATE ${getRecordID(table, args.id)} ${shouldUseContent ? 'CONTENT' : 'MERGE'} ${literal(updateContent)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
         if (await queueTransactionStatement(this, args.req, statement)) {
-            const docs = applyReadTransforms(this, args.collection, [normalizeDocument({ ...existingDoc, ...data, id: args.id })], args.locale);
+            const snapshot = normalizeDocument({ ...existingDoc, ...data, id: args.id });
+            await addTransactionDoc(this, args.req, args.collection, snapshot);
+            const docs = applyReadTransforms(this, args.collection, [snapshot], args.locale);
             return shouldReturn ? applySelect(docs[0] ?? null, args.select) : null;
         }
         try {
@@ -1100,7 +1102,9 @@ export const updateOne = async function updateOne(args) {
     const updateContent = shouldUseContent ? { ...found, ...data } : data;
     const statement = `UPDATE ${getRecordID(table, found.id)} ${shouldUseContent ? 'CONTENT' : 'MERGE'} ${literal(updateContent)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
     if (await queueTransactionStatement(this, args.req, statement)) {
-        const docs = applyReadTransforms(this, args.collection, [normalizeDocument({ ...found, ...data })], args.locale);
+        const snapshot = normalizeDocument({ ...found, ...data });
+        await addTransactionDoc(this, args.req, args.collection, snapshot);
+        const docs = applyReadTransforms(this, args.collection, [snapshot], args.locale);
         return shouldReturn ? applySelect(docs[0] ?? null, args.select) : null;
     }
     try {

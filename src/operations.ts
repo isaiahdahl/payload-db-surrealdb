@@ -1208,7 +1208,9 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
     const statement = `UPDATE ${getRecordID(table, args.id)} ${shouldUseContent ? 'CONTENT' : 'MERGE'} ${literal(updateContent)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
 
     if (await queueTransactionStatement(this, args.req, statement)) {
-      const docs = applyReadTransforms(this, args.collection, [normalizeDocument({ ...existingDoc, ...data, id: args.id }) as Record<string, unknown>], args.locale)
+      const snapshot = normalizeDocument({ ...existingDoc, ...data, id: args.id }) as Record<string, unknown>
+      await addTransactionDoc(this, args.req, args.collection, snapshot)
+      const docs = applyReadTransforms(this, args.collection, [snapshot], args.locale)
       return shouldReturn ? applySelect(docs[0] ?? null, args.select) : null
     }
 
@@ -1247,7 +1249,9 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
   const statement = `UPDATE ${getRecordID(table, found.id)} ${shouldUseContent ? 'CONTENT' : 'MERGE'} ${literal(updateContent)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
 
   if (await queueTransactionStatement(this, args.req, statement)) {
-    const docs = applyReadTransforms(this, args.collection, [normalizeDocument({ ...found, ...data }) as Record<string, unknown>], args.locale)
+    const snapshot = normalizeDocument({ ...found, ...data }) as Record<string, unknown>
+    await addTransactionDoc(this, args.req, args.collection, snapshot)
+    const docs = applyReadTransforms(this, args.collection, [snapshot], args.locale)
     return shouldReturn ? applySelect(docs[0] ?? null, args.select) : null
   }
 
