@@ -7,6 +7,7 @@ import { applyDefaults, applySelect, getCollectionConfig, getValueAtPath, hasTim
 import { getPagination } from './utilities/pagination.js';
 import { buildRelationshipAwareWhere, transformRelationshipReads, transformRelationshipWrites } from './utilities/relationships.js';
 import { escapeIdent, getRecordID, getTableName, literal, normalizeDocument } from './utilities/sql.js';
+import { compareValues, getSortSQL, sortValues, valuesEqual } from './utilities/sort.js';
 const randomID = () => {
     const crypto = globalThis.crypto;
     return crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -72,48 +73,10 @@ const whereUsesVirtual = (adapter, collection, where) => {
         return usesClientOperator || Boolean(pathRootField(adapter, collection, key)?.hasMany) || key.includes('.') || key.includes('__') || Boolean(getVirtualAlias(adapter, collection, key)) || whereUsesLocalizedFields(adapter, collection, { [key]: value }) || isLocalizedRelationshipField(adapter, collection, key) || isRelationshipPath(adapter, collection, key);
     });
 };
-const sortValues = (sort) => (Array.isArray(sort) ? sort : sort ? [sort] : [])
-    .flatMap((value) => String(value).split(','))
-    .filter((value) => value.trim());
 const sortUsesVirtual = (adapter, collection, sort) => sortValues(sort).some((value) => {
     const path = value.replace(/^-|^\+/, '');
     return Boolean(getVirtualAlias(adapter, collection, path)) || Boolean(getLocalizedFieldPath(adapter, collection, path)) || isRelationshipPath(adapter, collection, path);
 });
-const compareScalarValues = (a, b) => {
-    if (a === b)
-        return 0;
-    if (a === null || a === undefined)
-        return 1;
-    if (b === null || b === undefined)
-        return -1;
-    if (typeof a === 'number' && typeof b === 'number')
-        return a - b;
-    return String(a).localeCompare(String(b), undefined, { numeric: true });
-};
-const getComparableValue = (value) => {
-    if (!Array.isArray(value)) {
-        return value;
-    }
-    const values = value.filter((item) => item !== null && item !== undefined);
-    values.sort(compareScalarValues);
-    return values[0];
-};
-const normalizeComparableValue = (value) => {
-    if (value && typeof value === 'object' && !Array.isArray(value)) {
-        const object = value;
-        if ('relationTo' in object && 'value' in object) {
-            return { relationTo: object.relationTo, value: normalizeComparableValue(object.value) };
-        }
-        if ('id' in object) {
-            return object.id;
-        }
-        if ('en' in object) {
-            return normalizeComparableValue(object.en);
-        }
-    }
-    return value;
-};
-const compareValues = (a, b) => compareScalarValues(getComparableValue(normalizeComparableValue(a)), getComparableValue(normalizeComparableValue(b)));
 const toBoolean = (value) => value === 'false' ? false : Boolean(value);
 const parseNear = (value) => {
     const parts = Array.isArray(value) ? value : (typeof value === 'string' ? value.split(',').map((part) => part.trim()) : []);
@@ -270,21 +233,6 @@ const docMatchesWhere = (adapter, collection, doc, where, locale) => {
         assertSafeClientQueryValue(key, value);
         return actual === value;
     });
-};
-const getSortSQL = (sort) => {
-    const values = sortValues(sort);
-    if (!values.length) {
-        return 'ORDER BY createdAt DESC';
-    }
-    const parts = values.map((sortValue) => {
-        const direction = sortValue.startsWith('-') ? 'DESC' : 'ASC';
-        const field = sortValue.replace(/^-|^\+/, '');
-        return `${field === 'id' ? 'id' : pathToSQL(field)} ${direction}`;
-    });
-    if (!values.some((value) => value.replace(/^-|^\+/, '') === 'createdAt')) {
-        parts.push('createdAt DESC');
-    }
-    return `ORDER BY ${parts.join(', ')}`;
 };
 const mergeTransactionDocs = (docs, transactionDocs, deletedIDs = []) => {
     const deleted = new Set(deletedIDs);
@@ -556,7 +504,6 @@ const getDepth = (args) => {
     }
     return 0;
 };
-const valuesEqual = (a, b) => JSON.stringify(normalizeComparableValue(a)) === JSON.stringify(normalizeComparableValue(b));
 const appendUnique = (target, value) => {
     const values = Array.isArray(value) ? value : [value];
     const next = [...target];

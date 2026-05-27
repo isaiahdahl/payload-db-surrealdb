@@ -23,6 +23,7 @@ import { applyDefaults, applySelect, getCollectionConfig, getValueAtPath, hasTim
 import { getPagination } from './utilities/pagination.js'
 import { buildRelationshipAwareWhere, transformRelationshipReads, transformRelationshipWrites } from './utilities/relationships.js'
 import { escapeIdent, getRecordID, getTableName, literal, normalizeDocument } from './utilities/sql.js'
+import { compareValues, getSortSQL, sortValues, valuesEqual } from './utilities/sort.js'
 
 const randomID = (): string => {
   const crypto = globalThis.crypto as { randomUUID?: () => string } | undefined
@@ -104,56 +105,11 @@ const whereUsesVirtual = (adapter: SurrealAdapter, collection: string, where: un
   })
 }
 
-const sortValues = (sort?: string | string[]): string[] => (Array.isArray(sort) ? sort : sort ? [sort] : [])
-  .flatMap((value) => String(value).split(','))
-  .filter((value) => value.trim())
-
 const sortUsesVirtual = (adapter: SurrealAdapter, collection: string, sort?: string | string[]): boolean =>
   sortValues(sort).some((value) => {
     const path = value.replace(/^-|^\+/, '')
     return Boolean(getVirtualAlias(adapter, collection, path)) || Boolean(getLocalizedFieldPath(adapter, collection, path)) || isRelationshipPath(adapter, collection, path)
   })
-
-const compareScalarValues = (a: unknown, b: unknown): number => {
-  if (a === b) return 0
-  if (a === null || a === undefined) return 1
-  if (b === null || b === undefined) return -1
-  if (typeof a === 'number' && typeof b === 'number') return a - b
-  return String(a).localeCompare(String(b), undefined, { numeric: true })
-}
-
-const getComparableValue = (value: unknown): unknown => {
-  if (!Array.isArray(value)) {
-    return value
-  }
-
-  const values = value.filter((item) => item !== null && item !== undefined)
-  values.sort(compareScalarValues)
-
-  return values[0]
-}
-
-const normalizeComparableValue = (value: unknown): unknown => {
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
-    const object = value as Record<string, unknown>
-
-    if ('relationTo' in object && 'value' in object) {
-      return { relationTo: object.relationTo, value: normalizeComparableValue(object.value) }
-    }
-
-    if ('id' in object) {
-      return object.id
-    }
-
-    if ('en' in object) {
-      return normalizeComparableValue(object.en)
-    }
-  }
-
-  return value
-}
-
-const compareValues = (a: unknown, b: unknown): number => compareScalarValues(getComparableValue(normalizeComparableValue(a)), getComparableValue(normalizeComparableValue(b)))
 
 const toBoolean = (value: unknown): boolean => value === 'false' ? false : Boolean(value)
 
@@ -311,27 +267,6 @@ const docMatchesWhere = (adapter: SurrealAdapter, collection: string, doc: Recor
     assertSafeClientQueryValue(key, value)
     return actual === value
   })
-}
-
-const getSortSQL = (sort?: string | string[]): string => {
-  const values = sortValues(sort)
-
-  if (!values.length) {
-    return 'ORDER BY createdAt DESC'
-  }
-
-  const parts = values.map((sortValue) => {
-    const direction = sortValue.startsWith('-') ? 'DESC' : 'ASC'
-    const field = sortValue.replace(/^-|^\+/, '')
-
-    return `${field === 'id' ? 'id' : pathToSQL(field)} ${direction}`
-  })
-
-  if (!values.some((value) => value.replace(/^-|^\+/, '') === 'createdAt')) {
-    parts.push('createdAt DESC')
-  }
-
-  return `ORDER BY ${parts.join(', ')}`
 }
 
 const mergeTransactionDocs = (
@@ -628,8 +563,6 @@ const getDepth = (args: Record<string, unknown>): number => {
   }
   return 0
 }
-
-const valuesEqual = (a: unknown, b: unknown): boolean => JSON.stringify(normalizeComparableValue(a)) === JSON.stringify(normalizeComparableValue(b))
 
 const appendUnique = (target: unknown[], value: unknown): unknown[] => {
   const values = Array.isArray(value) ? value : [value]
