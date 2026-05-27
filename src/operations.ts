@@ -17,7 +17,7 @@ import type { SurrealAdapter } from './index.js'
 import { SurrealDBError } from './client.js'
 import { withPayloadJobUpdateLock } from './jobs/updateLock.js'
 import { pathToSQL } from './queries/buildWhere.js'
-import { addTransactionDoc, getTransactionDocs, queueTransactionStatement } from './transactions/index.js'
+import { addTransactionDeletedDocs, addTransactionDoc, getTransactionDeletedIDs, getTransactionDocs, queueTransactionStatement } from './transactions/index.js'
 import { applyDefaults, applySelect, getCollectionConfig, getValueAtPath, hasTimestamps, setValueAtPath } from './utilities/fields.js'
 import { buildRelationshipAwareWhere, transformRelationshipReads, transformRelationshipWrites } from './utilities/relationships.js'
 import { escapeIdent, getRecordID, getTableName, literal, normalizeDocument } from './utilities/sql.js'
@@ -335,11 +335,14 @@ const getSortSQL = (sort?: string | string[]): string => {
 const mergeTransactionDocs = (
   docs: Record<string, unknown>[],
   transactionDocs: Record<string, unknown>[],
+  deletedIDs: Array<number | string> = [],
 ): Record<string, unknown>[] => {
-  if (!transactionDocs.length) return docs
+  const deleted = new Set(deletedIDs)
+  const visibleDocs = deleted.size ? docs.filter((doc) => !deleted.has(doc.id as number | string)) : docs
+  if (!transactionDocs.length) return visibleDocs
   const transactionIDs = new Set(transactionDocs.map((doc) => doc.id))
 
-  return [...docs.filter((doc) => !transactionIDs.has(doc.id)), ...transactionDocs]
+  return [...visibleDocs.filter((doc) => !transactionIDs.has(doc.id)), ...transactionDocs]
 }
 
 const getPagination = (args: Record<string, any>) => {
@@ -1043,7 +1046,8 @@ export const findOne: FindOne = (async function findOne(this: SurrealAdapter, ar
   try {
     const result = await this.client.query<Record<string, unknown>[]>(`SELECT * FROM ${table} ${where} LIMIT 1;`)
     const transactionDocs = await getTransactionDocs(this, args.req, args.collection)
-    const mergedDocs = mergeTransactionDocs(normalizeDocs(result) as Record<string, unknown>[], transactionDocs)
+    const deletedIDs = await getTransactionDeletedIDs(this, args.req, args.collection)
+    const mergedDocs = mergeTransactionDocs(normalizeDocs(result) as Record<string, unknown>[], transactionDocs, deletedIDs)
     const matchingDocs = transactionDocs.length
       ? mergedDocs.filter((doc) => docMatchesWhere(this, args.collection, doc, args.where, args.locale)).slice(0, 1)
       : mergedDocs
@@ -1088,7 +1092,8 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
 
   const needsClientVirtualHandling = useClientVirtuals || useClientSort
   const transactionDocs = await getTransactionDocs(this, args.req, args.collection)
-  const mergedDocs = mergeTransactionDocs(normalizeDocs(docs) as Record<string, unknown>[], transactionDocs)
+  const deletedIDs = await getTransactionDeletedIDs(this, args.req, args.collection)
+  const mergedDocs = mergeTransactionDocs(normalizeDocs(docs) as Record<string, unknown>[], transactionDocs, deletedIDs)
   const baseDocs = applyReadTransforms(this, args.collection, mergedDocs, needsClientVirtualHandling ? 'all' : args.locale, !(args as Record<string, unknown>).draftsEnabled)
   let normalized = needsClientVirtualHandling
     ? baseDocs
@@ -1152,6 +1157,23 @@ export const count: Count = async function count(this: SurrealAdapter, args) {
 
   const table = escapeIdent(getTableName(args.collection, this.tablePrefix))
   const where = buildRelationshipAwareWhere(this, args.collection, args.where)
+
+  const transactionDocs = await getTransactionDocs(this, args.req, args.collection)
+  const deletedIDs = await getTransactionDeletedIDs(this, args.req, args.collection)
+
+  if (transactionDocs.length || deletedIDs.length) {
+    try {
+      const result = await this.client.query<Record<string, unknown>[]>(`SELECT * FROM ${table} ${where};`)
+      const mergedDocs = mergeTransactionDocs(normalizeDocs(result) as Record<string, unknown>[], transactionDocs, deletedIDs)
+      return { totalDocs: mergedDocs.filter((doc) => docMatchesWhere(this, args.collection, doc, args.where, args.locale)).length }
+    } catch (error) {
+      if (isMissingTableError(error)) {
+        return { totalDocs: transactionDocs.filter((doc) => docMatchesWhere(this, args.collection, doc, args.where, args.locale)).length }
+      }
+
+      throw error
+    }
+  }
 
   try {
     const result = await this.client.query(
@@ -1326,7 +1348,9 @@ export const deleteOne: DeleteOne = async function deleteOne(this: SurrealAdapte
 
   const statement = `DELETE ${getRecordID(getTableName(args.collection, this.tablePrefix), found.id)};`
 
-  if (!(await queueTransactionStatement(this, args.req, statement))) {
+  if (await queueTransactionStatement(this, args.req, statement)) {
+    await addTransactionDeletedDocs(this, args.req, args.collection, [found])
+  } else {
     await this.client.query(statement)
   }
 
@@ -1338,7 +1362,11 @@ export const deleteMany: DeleteMany = async function deleteMany(this: SurrealAda
   const where = buildRelationshipAwareWhere(this, args.collection, args.where)
   const statement = `DELETE ${table} ${where};`
 
-  if (!(await queueTransactionStatement(this, args.req, statement))) {
+  const queued = await queueTransactionStatement(this, args.req, statement)
+  if (queued) {
+    const matching = await find.call(this, { collection: args.collection, limit: 0, req: args.req, where: args.where })
+    await addTransactionDeletedDocs(this, args.req, args.collection, matching.docs as Record<string, unknown>[])
+  } else {
     await this.client.query(statement)
   }
 }

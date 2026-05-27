@@ -1,7 +1,7 @@
 import { ValidationError } from 'payload';
 import { withPayloadJobUpdateLock } from './jobs/updateLock.js';
 import { pathToSQL } from './queries/buildWhere.js';
-import { addTransactionDoc, getTransactionDocs, queueTransactionStatement } from './transactions/index.js';
+import { addTransactionDeletedDocs, addTransactionDoc, getTransactionDeletedIDs, getTransactionDocs, queueTransactionStatement } from './transactions/index.js';
 import { applyDefaults, applySelect, getCollectionConfig, getValueAtPath, hasTimestamps } from './utilities/fields.js';
 import { buildRelationshipAwareWhere, transformRelationshipReads, transformRelationshipWrites } from './utilities/relationships.js';
 import { escapeIdent, getRecordID, getTableName, literal, normalizeDocument } from './utilities/sql.js';
@@ -284,11 +284,13 @@ const getSortSQL = (sort) => {
     }
     return `ORDER BY ${parts.join(', ')}`;
 };
-const mergeTransactionDocs = (docs, transactionDocs) => {
+const mergeTransactionDocs = (docs, transactionDocs, deletedIDs = []) => {
+    const deleted = new Set(deletedIDs);
+    const visibleDocs = deleted.size ? docs.filter((doc) => !deleted.has(doc.id)) : docs;
     if (!transactionDocs.length)
-        return docs;
+        return visibleDocs;
     const transactionIDs = new Set(transactionDocs.map((doc) => doc.id));
-    return [...docs.filter((doc) => !transactionIDs.has(doc.id)), ...transactionDocs];
+    return [...visibleDocs.filter((doc) => !transactionIDs.has(doc.id)), ...transactionDocs];
 };
 const getPagination = (args) => {
     const limit = Number(args.limit ?? 0);
@@ -926,7 +928,8 @@ export const findOne = (async function findOne(args) {
     try {
         const result = await this.client.query(`SELECT * FROM ${table} ${where} LIMIT 1;`);
         const transactionDocs = await getTransactionDocs(this, args.req, args.collection);
-        const mergedDocs = mergeTransactionDocs(normalizeDocs(result), transactionDocs);
+        const deletedIDs = await getTransactionDeletedIDs(this, args.req, args.collection);
+        const mergedDocs = mergeTransactionDocs(normalizeDocs(result), transactionDocs, deletedIDs);
         const matchingDocs = transactionDocs.length
             ? mergedDocs.filter((doc) => docMatchesWhere(this, args.collection, doc, args.where, args.locale)).slice(0, 1)
             : mergedDocs;
@@ -966,7 +969,8 @@ export const find = async function find(args) {
     }
     const needsClientVirtualHandling = useClientVirtuals || useClientSort;
     const transactionDocs = await getTransactionDocs(this, args.req, args.collection);
-    const mergedDocs = mergeTransactionDocs(normalizeDocs(docs), transactionDocs);
+    const deletedIDs = await getTransactionDeletedIDs(this, args.req, args.collection);
+    const mergedDocs = mergeTransactionDocs(normalizeDocs(docs), transactionDocs, deletedIDs);
     const baseDocs = applyReadTransforms(this, args.collection, mergedDocs, needsClientVirtualHandling ? 'all' : args.locale, !args.draftsEnabled);
     let normalized = needsClientVirtualHandling
         ? baseDocs
@@ -1023,6 +1027,21 @@ export const count = async function count(args) {
     }
     const table = escapeIdent(getTableName(args.collection, this.tablePrefix));
     const where = buildRelationshipAwareWhere(this, args.collection, args.where);
+    const transactionDocs = await getTransactionDocs(this, args.req, args.collection);
+    const deletedIDs = await getTransactionDeletedIDs(this, args.req, args.collection);
+    if (transactionDocs.length || deletedIDs.length) {
+        try {
+            const result = await this.client.query(`SELECT * FROM ${table} ${where};`);
+            const mergedDocs = mergeTransactionDocs(normalizeDocs(result), transactionDocs, deletedIDs);
+            return { totalDocs: mergedDocs.filter((doc) => docMatchesWhere(this, args.collection, doc, args.where, args.locale)).length };
+        }
+        catch (error) {
+            if (isMissingTableError(error)) {
+                return { totalDocs: transactionDocs.filter((doc) => docMatchesWhere(this, args.collection, doc, args.where, args.locale)).length };
+            }
+            throw error;
+        }
+    }
     try {
         const result = await this.client.query(`SELECT count() AS count FROM ${table} ${where} GROUP ALL;`);
         return { totalDocs: result[0]?.count ?? 0 };
@@ -1172,7 +1191,10 @@ export const deleteOne = async function deleteOne(args) {
         return null;
     }
     const statement = `DELETE ${getRecordID(getTableName(args.collection, this.tablePrefix), found.id)};`;
-    if (!(await queueTransactionStatement(this, args.req, statement))) {
+    if (await queueTransactionStatement(this, args.req, statement)) {
+        await addTransactionDeletedDocs(this, args.req, args.collection, [found]);
+    }
+    else {
         await this.client.query(statement);
     }
     return args.returning === false ? null : found;
@@ -1181,7 +1203,12 @@ export const deleteMany = async function deleteMany(args) {
     const table = escapeIdent(getTableName(args.collection, this.tablePrefix));
     const where = buildRelationshipAwareWhere(this, args.collection, args.where);
     const statement = `DELETE ${table} ${where};`;
-    if (!(await queueTransactionStatement(this, args.req, statement))) {
+    const queued = await queueTransactionStatement(this, args.req, statement);
+    if (queued) {
+        const matching = await find.call(this, { collection: args.collection, limit: 0, req: args.req, where: args.where });
+        await addTransactionDeletedDocs(this, args.req, args.collection, matching.docs);
+    }
+    else {
         await this.client.query(statement);
     }
 };

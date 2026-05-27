@@ -33,10 +33,26 @@ export const addTransactionDoc = async (adapter, req, collection, doc) => {
     const snapshot = typeof structuredClone === 'function'
         ? structuredClone(doc)
         : JSON.parse(JSON.stringify(doc));
+    transaction.deletedIDs ??= {};
+    transaction.deletedIDs[collection] = (transaction.deletedIDs[collection] ?? []).filter((id) => id !== snapshot.id);
     transaction.docs[collection] = [
         ...(transaction.docs[collection] ?? []).filter((existing) => existing.id !== snapshot.id),
         snapshot,
     ];
+};
+export const addTransactionDeletedDocs = async (adapter, req, collection, docs) => {
+    const transaction = await getTransaction(adapter, req);
+    if (!transaction || !docs.length)
+        return;
+    transaction.deletedIDs ??= {};
+    const deleted = new Set([...(transaction.deletedIDs[collection] ?? []), ...docs.map((doc) => doc.id).filter((id) => id !== undefined)]);
+    transaction.deletedIDs[collection] = [...deleted];
+    transaction.docs ??= {};
+    transaction.docs[collection] = (transaction.docs[collection] ?? []).filter((doc) => !deleted.has(doc.id));
+};
+export const getTransactionDeletedIDs = async (adapter, req, collection) => {
+    const transaction = await getTransaction(adapter, req);
+    return transaction?.deletedIDs?.[collection] ?? [];
 };
 export const getTransactionDocs = async (adapter, req, collection) => {
     const transaction = await getTransaction(adapter, req);

@@ -4,6 +4,7 @@ import type { SurrealAdapter } from '../index.js'
 
 export type SurrealTransactionSession = {
   createdAt: number
+  deletedIDs?: Record<string, Array<number | string>>
   docs?: Record<string, Record<string, unknown>[]>
   statements: string[]
 }
@@ -67,10 +68,36 @@ export const addTransactionDoc = async (
   const snapshot = typeof structuredClone === 'function'
     ? structuredClone(doc)
     : JSON.parse(JSON.stringify(doc))
+  transaction.deletedIDs ??= {}
+  transaction.deletedIDs[collection] = (transaction.deletedIDs[collection] ?? []).filter((id) => id !== snapshot.id)
   transaction.docs[collection] = [
     ...(transaction.docs[collection] ?? []).filter((existing) => existing.id !== snapshot.id),
     snapshot,
   ]
+}
+
+export const addTransactionDeletedDocs = async (
+  adapter: SurrealAdapter,
+  req: { transactionID?: Promise<number | string | null> | number | string | null } | undefined,
+  collection: string,
+  docs: Record<string, unknown>[],
+): Promise<void> => {
+  const transaction = await getTransaction(adapter, req)
+  if (!transaction || !docs.length) return
+  transaction.deletedIDs ??= {}
+  const deleted = new Set([...(transaction.deletedIDs[collection] ?? []), ...docs.map((doc) => doc.id as number | string).filter((id) => id !== undefined)])
+  transaction.deletedIDs[collection] = [...deleted]
+  transaction.docs ??= {}
+  transaction.docs[collection] = (transaction.docs[collection] ?? []).filter((doc) => !deleted.has(doc.id as number | string))
+}
+
+export const getTransactionDeletedIDs = async (
+  adapter: SurrealAdapter,
+  req: { transactionID?: Promise<number | string | null> | number | string | null } | undefined,
+  collection: string,
+): Promise<Array<number | string>> => {
+  const transaction = await getTransaction(adapter, req)
+  return transaction?.deletedIDs?.[collection] ?? []
 }
 
 export const getTransactionDocs = async (
