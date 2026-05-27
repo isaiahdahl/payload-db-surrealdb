@@ -104,8 +104,7 @@ const whereUsesVirtual = (adapter: SurrealAdapter, collection: string, where: un
 
 const sortValues = (sort?: string | string[]): string[] => (Array.isArray(sort) ? sort : sort ? [sort] : [])
   .flatMap((value) => String(value).split(','))
-  .map((value) => value.trim())
-  .filter(Boolean)
+  .filter((value) => value.trim())
 
 const sortUsesVirtual = (adapter: SurrealAdapter, collection: string, sort?: string | string[]): boolean =>
   sortValues(sort).some((value) => {

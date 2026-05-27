@@ -72,8 +72,7 @@ const whereUsesVirtual = (adapter, collection, where) => {
 };
 const sortValues = (sort) => (Array.isArray(sort) ? sort : sort ? [sort] : [])
     .flatMap((value) => String(value).split(','))
-    .map((value) => value.trim())
-    .filter(Boolean);
+    .filter((value) => value.trim());
 const sortUsesVirtual = (adapter, collection, sort) => sortValues(sort).some((value) => {
     const path = value.replace(/^-|^\+/, '');
     return Boolean(getVirtualAlias(adapter, collection, path)) || Boolean(getLocalizedFieldPath(adapter, collection, path)) || isRelationshipPath(adapter, collection, path);
