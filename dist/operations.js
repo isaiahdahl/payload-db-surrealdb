@@ -9,6 +9,7 @@ import { getPagination } from './utilities/pagination.js';
 import { buildRelationshipAwareWhere, transformRelationshipReads, transformRelationshipWrites } from './utilities/relationships.js';
 import { escapeIdent, getRecordID, getTableName, literal, normalizeDocument } from './utilities/sql.js';
 import { compareValues, getSortSQL, sortValues, valuesEqual } from './utilities/sort.js';
+import { mergeTransactionDocs } from './utilities/transactionVisibility.js';
 const randomID = () => {
     const crypto = globalThis.crypto;
     return crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -184,14 +185,6 @@ const docMatchesWhere = (adapter, collection, doc, where, locale) => {
         assertSafeClientQueryValue(key, value);
         return actual === value;
     });
-};
-const mergeTransactionDocs = (docs, transactionDocs, deletedIDs = []) => {
-    const deleted = new Set(deletedIDs);
-    const visibleDocs = deleted.size ? docs.filter((doc) => !deleted.has(doc.id)) : docs;
-    if (!transactionDocs.length)
-        return visibleDocs;
-    const transactionIDs = new Set(transactionDocs.map((doc) => doc.id));
-    return [...visibleDocs.filter((doc) => !transactionIDs.has(doc.id)), ...transactionDocs];
 };
 const mapWriteError = (adapter, collection, error) => {
     const message = error instanceof Error ? error.message : String(error);
