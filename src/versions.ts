@@ -238,7 +238,7 @@ export const queryDrafts: QueryDrafts = async function queryDrafts(this: Surreal
   })
 
   const docs = result.docs.map((doc) => toDraftDoc(doc as Record<string, unknown>)).filter(Boolean) as Record<string, unknown>[]
-  await transformRelationshipReads(this, args.collection, docs, typeof (args as Record<string, unknown>).depth === 'number' ? (args as Record<string, unknown>).depth as number : 0, args.joins as never)
+  await transformRelationshipReads(this, args.collection, docs, typeof (args as Record<string, unknown>).depth === 'number' ? (args as Record<string, unknown>).depth as number : 0, args.joins as never, args.locale)
 
   return {
     ...result,

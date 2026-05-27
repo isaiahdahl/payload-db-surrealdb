@@ -1026,7 +1026,7 @@ export const create: Create = async function create(this: SurrealAdapter, args) 
       const customIDType = (this.payload as any)?.collections?.[args.collection]?.customIDType ?? (collectionConfig as { customIDType?: string } | undefined)?.customIDType
       docs[0].id = (idField?.type === 'number' || customIDType === 'number' || args.collection.endsWith('-number')) && !Number.isNaN(Number(resolvedID)) ? Number(resolvedID) : resolvedID
     }
-    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
+    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never, args.locale)
 
     return shouldReturn ? applySelect(populated[0] ?? null, args.select) : null
   } catch (error) {
@@ -1052,7 +1052,7 @@ export const findOne: FindOne = (async function findOne(this: SurrealAdapter, ar
       ? mergedDocs.filter((doc) => docMatchesWhere(this, args.collection, doc, args.where, args.locale)).slice(0, 1)
       : mergedDocs
     const docs = applyReadTransforms(this, args.collection, matchingDocs, args.locale, !(args as Record<string, unknown>).draftsEnabled)
-    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
+    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never, args.locale)
 
     return applySelect(populated[0] ?? null, args.select)
   } catch (error) {
@@ -1100,10 +1100,10 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
   const baseDocs = applyReadTransforms(this, args.collection, visibleDocs, needsClientVirtualHandling ? 'all' : args.locale, !(args as Record<string, unknown>).draftsEnabled)
   let normalized = needsClientVirtualHandling
     ? baseDocs
-    : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
+    : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args as never), (args as Record<string, unknown>).joins as never, args.locale)
   const clientVirtualDepth = whereUsesJoinField(this, args.collection, args.where) ? 1 : 3
   let workingDocs = needsClientVirtualHandling
-    ? await transformRelationshipReads(this, args.collection, structuredClone(baseDocs), Math.max(getDepth(args as never), clientVirtualDepth), (args as Record<string, unknown>).joins as never)
+    ? await transformRelationshipReads(this, args.collection, structuredClone(baseDocs), Math.max(getDepth(args as never), clientVirtualDepth), (args as Record<string, unknown>).joins as never, args.locale)
     : normalized
   let workingIndexes = workingDocs.map((_, index) => index)
 
@@ -1240,7 +1240,7 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
       try {
         const result = await this.client.query<Record<string, unknown>[]>(statement)
         const docs = applyReadTransforms(this, args.collection, normalizeDocs(result) as Record<string, unknown>[], args.locale)
-        const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
+        const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never, args.locale)
 
         return shouldReturn ? applySelect(populated[0] ?? null, args.select) : null
       } catch (error) {
@@ -1276,7 +1276,7 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
     try {
       const result = await this.client.query<Record<string, unknown>[]>(statement)
       const docs = applyReadTransforms(this, args.collection, normalizeDocs(result) as Record<string, unknown>[], args.locale)
-      const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
+      const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never, args.locale)
 
       return shouldReturn ? applySelect(populated[0] ?? null, args.select) : null
     } catch (error) {
@@ -1317,7 +1317,7 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
   try {
     const result = await this.client.query<Record<string, unknown>[]>(statement)
     const docs = applyReadTransforms(this, args.collection, normalizeDocs(result) as Record<string, unknown>[], args.locale)
-    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
+    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never, args.locale)
 
     return shouldReturn ? applySelect(populated[0] ?? null, args.select) : null
   } catch (error) {

@@ -34,7 +34,7 @@ export declare const transformRelationshipReads: <T extends Record<string, unkno
     limit?: number;
     page?: number;
     sort?: string | string[];
-} | false>) => Promise<T[]>;
+} | false>, locale?: string) => Promise<T[]>;
 export declare const transformRelationshipWhere: (collectionConfig: {
     fields?: Field[];
 } | undefined, where: unknown) => unknown;

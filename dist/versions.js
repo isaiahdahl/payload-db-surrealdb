@@ -183,7 +183,7 @@ export const queryDrafts = async function queryDrafts(args) {
         where: { and: [{ latest: { equals: true } }, draftWhere(args.where ?? {})] },
     });
     const docs = result.docs.map((doc) => toDraftDoc(doc)).filter(Boolean);
-    await transformRelationshipReads(this, args.collection, docs, typeof args.depth === 'number' ? args.depth : 0, args.joins);
+    await transformRelationshipReads(this, args.collection, docs, typeof args.depth === 'number' ? args.depth : 0, args.joins, args.locale);
     return {
         ...result,
         docs,

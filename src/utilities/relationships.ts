@@ -506,14 +506,15 @@ const getDefaultLocale = (adapter: SurrealAdapter): string | undefined => {
   return typeof localization === 'object' ? localization.defaultLocale : undefined
 }
 
-const pickLocaleWrapperValue = (value: Record<string, unknown>, localeCodes: string[], defaultLocale?: string): unknown => {
+const pickLocaleWrapperValue = (value: Record<string, unknown>, localeCodes: string[], activeLocale?: string, defaultLocale?: string): unknown => {
   if (!localeCodes.some((locale) => locale in value)) return undefined
+  if (activeLocale && activeLocale !== 'all' && activeLocale in value) return value[activeLocale]
   if (defaultLocale && defaultLocale in value) return value[defaultLocale]
   const first = localeCodes.find((locale) => locale in value)
   return first ? value[first] : undefined
 }
 
-const getValueAtPath = (value: unknown, path: string, localeCodes: string[] = [], defaultLocale?: string): unknown => {
+const getValueAtPath = (value: unknown, path: string, localeCodes: string[] = [], defaultLocale?: string, activeLocale?: string): unknown => {
   const [head, ...tail] = path.split('.').filter(Boolean)
 
   if (!head) {
@@ -521,7 +522,7 @@ const getValueAtPath = (value: unknown, path: string, localeCodes: string[] = []
   }
 
   if (Array.isArray(value)) {
-    return value.map((item) => getValueAtPath(item, path, localeCodes, defaultLocale))
+    return value.map((item) => getValueAtPath(item, path, localeCodes, defaultLocale, activeLocale))
   }
 
   if (!isPlainObject(value)) {
@@ -529,11 +530,11 @@ const getValueAtPath = (value: unknown, path: string, localeCodes: string[] = []
   }
 
   if (!(head in value)) {
-    const localeValue = pickLocaleWrapperValue(value, localeCodes, defaultLocale)
-    if (localeValue !== undefined) return getValueAtPath(localeValue, path, localeCodes, defaultLocale)
+    const localeValue = pickLocaleWrapperValue(value, localeCodes, activeLocale, defaultLocale)
+    if (localeValue !== undefined) return getValueAtPath(localeValue, path, localeCodes, defaultLocale, activeLocale)
   }
 
-  return getValueAtPath(value[head], tail.join('.'), localeCodes, defaultLocale)
+  return getValueAtPath(value[head], tail.join('.'), localeCodes, defaultLocale, activeLocale)
 }
 
 const setValueAtPath = (doc: Record<string, unknown>, path: string, value: unknown): void => {
@@ -555,20 +556,20 @@ const setValueAtPath = (doc: Record<string, unknown>, path: string, value: unkno
   target[last] = value
 }
 
-const flattenJoinValues = (value: unknown, localeCodes: string[] = [], defaultLocale?: string): unknown[] => {
+const flattenJoinValues = (value: unknown, localeCodes: string[] = [], defaultLocale?: string, activeLocale?: string): unknown[] => {
   if (Array.isArray(value)) {
-    return value.flatMap((item) => flattenJoinValues(item, localeCodes, defaultLocale))
+    return value.flatMap((item) => flattenJoinValues(item, localeCodes, defaultLocale, activeLocale))
   }
 
   if (isPlainObject(value) && 'value' in value) {
-    return flattenJoinValues(value.value, localeCodes, defaultLocale)
+    return flattenJoinValues(value.value, localeCodes, defaultLocale, activeLocale)
   }
 
   if (isPlainObject(value)) {
-    const localeValue = pickLocaleWrapperValue(value, localeCodes, defaultLocale)
+    const localeValue = pickLocaleWrapperValue(value, localeCodes, activeLocale, defaultLocale)
     return localeValue !== undefined
-      ? flattenJoinValues(localeValue, localeCodes, defaultLocale)
-      : Object.values(value).flatMap((item) => flattenJoinValues(item, localeCodes, defaultLocale))
+      ? flattenJoinValues(localeValue, localeCodes, defaultLocale, activeLocale)
+      : Object.values(value).flatMap((item) => flattenJoinValues(item, localeCodes, defaultLocale, activeLocale))
   }
 
   return value === null || value === undefined ? [] : [value]
@@ -580,6 +581,7 @@ const resolveJoinFields = async (
   docs: Record<string, unknown>[],
   depth: number,
   joins?: Record<string, { limit?: number; page?: number; sort?: string | string[] } | false>,
+  locale?: string,
 ): Promise<void> => {
   if (!docs.length) {
     return
@@ -624,8 +626,8 @@ const resolveJoinFields = async (
       const populatedTargets = depth > 0 ? await transformRelationshipReads(adapter, targetCollection, targetDocs, depth - 1) : targetDocs
 
       for (const [index, targetDoc] of targetDocs.entries()) {
-        const foreignValue = getValueAtPath(targetDoc, field.on, localeCodes, defaultLocale)
-        const ids = flattenJoinValues(foreignValue, localeCodes, defaultLocale)
+        const foreignValue = getValueAtPath(targetDoc, field.on, localeCodes, defaultLocale, locale)
+        const ids = flattenJoinValues(foreignValue, localeCodes, defaultLocale, locale)
         const joinedDoc = Array.isArray(field.collection)
           ? {
               relationTo: targetCollection,
@@ -668,9 +670,10 @@ export const transformRelationshipReads = async <T extends Record<string, unknow
   docs: T[],
   depth = 0,
   joins?: Record<string, { limit?: number; page?: number; sort?: string | string[] } | false>,
+  locale?: string,
 ): Promise<T[]> => {
   await populateRelationshipFields(adapter, collection, docs, depth)
-  await resolveJoinFields(adapter, collection, docs, depth, joins)
+  await resolveJoinFields(adapter, collection, docs, depth, joins, locale)
 
   const baseCollection = getVersionBaseCollection(adapter, collection)
   const versionDocs = baseCollection
@@ -679,7 +682,7 @@ export const transformRelationshipReads = async <T extends Record<string, unknow
 
   if (baseCollection && versionDocs.length) {
     await populateRelationshipFields(adapter, baseCollection, versionDocs, depth)
-    await resolveJoinFields(adapter, baseCollection, versionDocs, depth, joins)
+    await resolveJoinFields(adapter, baseCollection, versionDocs, depth, joins, locale)
   }
 
   return docs

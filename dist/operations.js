@@ -911,7 +911,7 @@ export const create = async function create(args) {
             const customIDType = this.payload?.collections?.[args.collection]?.customIDType ?? collectionConfig?.customIDType;
             docs[0].id = (idField?.type === 'number' || customIDType === 'number' || args.collection.endsWith('-number')) && !Number.isNaN(Number(resolvedID)) ? Number(resolvedID) : resolvedID;
         }
-        const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args), args.joins);
+        const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args), args.joins, args.locale);
         return shouldReturn ? applySelect(populated[0] ?? null, args.select) : null;
     }
     catch (error) {
@@ -934,7 +934,7 @@ export const findOne = (async function findOne(args) {
             ? mergedDocs.filter((doc) => docMatchesWhere(this, args.collection, doc, args.where, args.locale)).slice(0, 1)
             : mergedDocs;
         const docs = applyReadTransforms(this, args.collection, matchingDocs, args.locale, !args.draftsEnabled);
-        const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args), args.joins);
+        const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args), args.joins, args.locale);
         return applySelect(populated[0] ?? null, args.select);
     }
     catch (error) {
@@ -977,10 +977,10 @@ export const find = async function find(args) {
     const baseDocs = applyReadTransforms(this, args.collection, visibleDocs, needsClientVirtualHandling ? 'all' : args.locale, !args.draftsEnabled);
     let normalized = needsClientVirtualHandling
         ? baseDocs
-        : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args), args.joins);
+        : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args), args.joins, args.locale);
     const clientVirtualDepth = whereUsesJoinField(this, args.collection, args.where) ? 1 : 3;
     let workingDocs = needsClientVirtualHandling
-        ? await transformRelationshipReads(this, args.collection, structuredClone(baseDocs), Math.max(getDepth(args), clientVirtualDepth), args.joins)
+        ? await transformRelationshipReads(this, args.collection, structuredClone(baseDocs), Math.max(getDepth(args), clientVirtualDepth), args.joins, args.locale)
         : normalized;
     let workingIndexes = workingDocs.map((_, index) => index);
     if (useClientVirtuals) {
@@ -1096,7 +1096,7 @@ export const updateOne = async function updateOne(args) {
             try {
                 const result = await this.client.query(statement);
                 const docs = applyReadTransforms(this, args.collection, normalizeDocs(result), args.locale);
-                const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args), args.joins);
+                const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args), args.joins, args.locale);
                 return shouldReturn ? applySelect(populated[0] ?? null, args.select) : null;
             }
             catch (error) {
@@ -1130,7 +1130,7 @@ export const updateOne = async function updateOne(args) {
         try {
             const result = await this.client.query(statement);
             const docs = applyReadTransforms(this, args.collection, normalizeDocs(result), args.locale);
-            const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args), args.joins);
+            const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args), args.joins, args.locale);
             return shouldReturn ? applySelect(populated[0] ?? null, args.select) : null;
         }
         catch (error) {
@@ -1167,7 +1167,7 @@ export const updateOne = async function updateOne(args) {
     try {
         const result = await this.client.query(statement);
         const docs = applyReadTransforms(this, args.collection, normalizeDocs(result), args.locale);
-        const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args), args.joins);
+        const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args), args.joins, args.locale);
         return shouldReturn ? applySelect(populated[0] ?? null, args.select) : null;
     }
     catch (error) {
