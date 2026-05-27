@@ -1,4 +1,5 @@
 import { ValidationError } from 'payload';
+import { withPayloadJobUpdateLock } from './jobs/updateLock.js';
 import { pathToSQL } from './queries/buildWhere.js';
 import { addTransactionDoc, getTransactionDocs, queueTransactionStatement } from './transactions/index.js';
 import { applyDefaults, applySelect, getCollectionConfig, getValueAtPath, hasTimestamps } from './utilities/fields.js';
@@ -234,25 +235,6 @@ const resolveLocaleValue = (value, locale) => {
         }
     }
     return value;
-};
-const payloadJobUpdateLocks = new Map();
-const withPayloadJobUpdateLock = async (id, operation) => {
-    const previous = payloadJobUpdateLocks.get(id) ?? Promise.resolve();
-    let release;
-    const current = new Promise((resolve) => {
-        release = resolve;
-    });
-    payloadJobUpdateLocks.set(id, previous.then(() => current, () => current));
-    await previous.catch(() => undefined);
-    try {
-        return await operation();
-    }
-    finally {
-        release();
-        if (payloadJobUpdateLocks.get(id) === current) {
-            payloadJobUpdateLocks.delete(id);
-        }
-    }
 };
 const unsafeJSONValue = /select\(|["'\\=]/i;
 const assertSafeClientQueryValue = (key, value) => {

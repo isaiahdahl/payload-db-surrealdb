@@ -15,6 +15,7 @@ import { ValidationError } from 'payload'
 import type { SurrealAdapter } from './index.js'
 
 import { SurrealDBError } from './client.js'
+import { withPayloadJobUpdateLock } from './jobs/updateLock.js'
 import { pathToSQL } from './queries/buildWhere.js'
 import { addTransactionDoc, getTransactionDocs, queueTransactionStatement } from './transactions/index.js'
 import { applyDefaults, applySelect, getCollectionConfig, getValueAtPath, hasTimestamps, setValueAtPath } from './utilities/fields.js'
@@ -274,28 +275,6 @@ const resolveLocaleValue = (value: unknown, locale?: unknown): unknown => {
   }
 
   return value
-}
-
-const payloadJobUpdateLocks = new Map<string, Promise<void>>()
-
-const withPayloadJobUpdateLock = async <T>(id: string, operation: () => Promise<T>): Promise<T> => {
-  const previous = payloadJobUpdateLocks.get(id) ?? Promise.resolve()
-  let release!: () => void
-  const current = new Promise<void>((resolve) => {
-    release = resolve
-  })
-  payloadJobUpdateLocks.set(id, previous.then(() => current, () => current))
-
-  await previous.catch(() => undefined)
-
-  try {
-    return await operation()
-  } finally {
-    release()
-    if (payloadJobUpdateLocks.get(id) === current) {
-      payloadJobUpdateLocks.delete(id)
-    }
-  }
 }
 
 const unsafeJSONValue = /select\(|["'\\=]/i
