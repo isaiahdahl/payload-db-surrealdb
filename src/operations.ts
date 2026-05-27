@@ -17,6 +17,7 @@ import type { SurrealAdapter } from './index.js'
 import { SurrealDBError } from './client.js'
 import { withPayloadJobUpdateLock } from './jobs/updateLock.js'
 import { pathToSQL } from './queries/buildWhere.js'
+import { getAtomicValueAtPath, removeDottedOperatorKeys, setAtomicValueAtPath } from './utilities/atomicUpdate.js'
 import { addTransactionDeletedDocs, addTransactionDoc, getTransactionDeletedIDs, getTransactionDocs, queueTransactionStatement } from './transactions/index.js'
 import { applyDefaults, applySelect, getCollectionConfig, getValueAtPath, hasTimestamps, setValueAtPath } from './utilities/fields.js'
 import { buildRelationshipAwareWhere, transformRelationshipReads, transformRelationshipWrites } from './utilities/relationships.js'
@@ -657,58 +658,6 @@ const removeValues = (target: unknown[], value: unknown): unknown[] => {
   return target.filter((item) => !values.some((remove) => valuesEqual(remove, item)))
 }
 
-const getAtomicValueAtPath = (doc: Record<string, unknown>, path: string): unknown => {
-  if (path === 'id') {
-    return doc.id
-  }
-
-  return path.split('.').reduce<unknown>((value, part) => {
-    if (Array.isArray(value)) {
-      const index = Number(part)
-
-      return Number.isInteger(index) ? value[index] : undefined
-    }
-
-    if (value && typeof value === 'object') {
-      return (value as Record<string, unknown>)[part]
-    }
-
-    return undefined
-  }, doc)
-}
-
-const setAtomicValueAtPath = (doc: Record<string, unknown>, path: string, value: unknown): void => {
-  const parts = path.split('.')
-  let target: unknown = doc
-
-  for (const [index, part] of parts.entries()) {
-    if (!target || typeof target !== 'object') {
-      return
-    }
-
-    if (index === parts.length - 1) {
-      if (Array.isArray(target)) {
-        const arrayIndex = Number(part)
-        if (Number.isInteger(arrayIndex)) target[arrayIndex] = value
-      } else {
-        ;(target as Record<string, unknown>)[part] = value
-      }
-
-      return
-    }
-
-    if (Array.isArray(target)) {
-      target = target[Number(part)]
-    } else {
-      const objectTarget = target as Record<string, unknown>
-      if (!objectTarget[part] || typeof objectTarget[part] !== 'object') {
-        objectTarget[part] = {}
-      }
-      target = objectTarget[part]
-    }
-  }
-}
-
 const collectUniqueFieldIndexes = (fields: any[] = [], prefix = ''): Array<{ fields: string[]; unique: true }> => fields.flatMap((field) => {
   if (field.type === 'tabs') {
     return (field.tabs ?? []).flatMap((tab: any) => collectUniqueFieldIndexes(tab.fields ?? [], tab.name ? `${prefix}${tab.name}.` : prefix))
@@ -906,16 +855,6 @@ const isRepublishingExistingLocaleOnly = (existing: Record<string, unknown>, dat
   }
 
   return true
-}
-
-const removeDottedOperatorKeys = (data: Record<string, unknown>): Record<string, unknown> => {
-  for (const [key, value] of Object.entries(data)) {
-    if (key.includes('.') && value && typeof value === 'object') {
-      delete data[key]
-    }
-  }
-
-  return data
 }
 
 const buildAtomicSetSQL = (_adapter: SurrealAdapter, _collection: string, data: Record<string, unknown>): string | null => {

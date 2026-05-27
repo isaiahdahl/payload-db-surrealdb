@@ -1,6 +1,7 @@
 import { ValidationError } from 'payload';
 import { withPayloadJobUpdateLock } from './jobs/updateLock.js';
 import { pathToSQL } from './queries/buildWhere.js';
+import { getAtomicValueAtPath, removeDottedOperatorKeys, setAtomicValueAtPath } from './utilities/atomicUpdate.js';
 import { addTransactionDeletedDocs, addTransactionDoc, getTransactionDeletedIDs, getTransactionDocs, queueTransactionStatement } from './transactions/index.js';
 import { applyDefaults, applySelect, getCollectionConfig, getValueAtPath, hasTimestamps } from './utilities/fields.js';
 import { buildRelationshipAwareWhere, transformRelationshipReads, transformRelationshipWrites } from './utilities/relationships.js';
@@ -576,52 +577,6 @@ const removeValues = (target, value) => {
     const values = Array.isArray(value) ? value : [value];
     return target.filter((item) => !values.some((remove) => valuesEqual(remove, item)));
 };
-const getAtomicValueAtPath = (doc, path) => {
-    if (path === 'id') {
-        return doc.id;
-    }
-    return path.split('.').reduce((value, part) => {
-        if (Array.isArray(value)) {
-            const index = Number(part);
-            return Number.isInteger(index) ? value[index] : undefined;
-        }
-        if (value && typeof value === 'object') {
-            return value[part];
-        }
-        return undefined;
-    }, doc);
-};
-const setAtomicValueAtPath = (doc, path, value) => {
-    const parts = path.split('.');
-    let target = doc;
-    for (const [index, part] of parts.entries()) {
-        if (!target || typeof target !== 'object') {
-            return;
-        }
-        if (index === parts.length - 1) {
-            if (Array.isArray(target)) {
-                const arrayIndex = Number(part);
-                if (Number.isInteger(arrayIndex))
-                    target[arrayIndex] = value;
-            }
-            else {
-                ;
-                target[part] = value;
-            }
-            return;
-        }
-        if (Array.isArray(target)) {
-            target = target[Number(part)];
-        }
-        else {
-            const objectTarget = target;
-            if (!objectTarget[part] || typeof objectTarget[part] !== 'object') {
-                objectTarget[part] = {};
-            }
-            target = objectTarget[part];
-        }
-    }
-};
 const collectUniqueFieldIndexes = (fields = [], prefix = '') => fields.flatMap((field) => {
     if (field.type === 'tabs') {
         return (field.tabs ?? []).flatMap((tab) => collectUniqueFieldIndexes(tab.fields ?? [], tab.name ? `${prefix}${tab.name}.` : prefix));
@@ -809,14 +764,6 @@ const isRepublishingExistingLocaleOnly = (existing, data, fields = [], locale) =
         }
     }
     return true;
-};
-const removeDottedOperatorKeys = (data) => {
-    for (const [key, value] of Object.entries(data)) {
-        if (key.includes('.') && value && typeof value === 'object') {
-            delete data[key];
-        }
-    }
-    return data;
 };
 const buildAtomicSetSQL = (_adapter, _collection, data) => {
     const assignments = [];
