@@ -76,17 +76,23 @@ run_suite() {
   perl -pe 's/\x1b\[[0-9;?]*[ -\/]*[@-~]//g' "$out" > "$clean_out" || cp "$out" "$clean_out"
   summary=$(grep -E "Tests  +" "$clean_out" | tail -1 || true)
   local failed passed
-  failed=$(python3 - "$summary" "$status" <<'PY'
+  failed=$(python3 - "$summary" "$status" "$clean_out" <<'PY'
 import re, sys
 s=sys.argv[1]
 status=int(sys.argv[2])
+path=sys.argv[3]
 m=re.search(r'(\d+) failed', s)
 if m:
     print(m.group(1))
 elif status == 0 and 'passed' in s and 'failed' not in s:
     print('0')
 else:
-    print('999')
+    text=open(path, encoding='utf-8', errors='ignore').read()
+    suite_match=re.search(r'Failed Suites\s+(\d+)', text)
+    if suite_match:
+        print(suite_match.group(1))
+    else:
+        print('999')
 PY
 )
   passed=$(python3 - "$summary" <<'PY'

@@ -51,6 +51,8 @@ Additional 1.0 readiness items that still need dedicated tests or manual validat
 
 When these checks are implemented as scripts or specs, add them to `autoresearch.sh` and include their failures in `blocker_failures`.
 
+Metric parsing note: if Vitest fails during suite setup before individual tests run, count the reported failed suite count instead of the `999` crash sentinel. Reserve `999` for genuine harness/parser/build failures where no reliable suite failure count is available.
+
 ## Metrics
 - **Primary conformance metric**: `blocker_failures` (count, lower is better) — failing tests across the full 1.0 objective sweep, including core adapter suites and plugin readiness suites when `RUN_PLUGIN_SUITES` is enabled.
 - **Architecture tie-breaker metrics**: `modularity_penalty` (lower is better), `largest_src_file_lines`, `operations_lines`, `relationships_lines`, `src_file_count`, and `large_src_files`. These do not outweigh conformance regressions, but they can justify keeping a refactor when `blocker_failures` and all guardrail suite results are unchanged.
