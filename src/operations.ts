@@ -1094,7 +1094,7 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
   let normalized = needsClientVirtualHandling
     ? baseDocs
     : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
-  const clientVirtualDepth = whereUsesJoinField(this, args.collection, args.where) ? 1 : 2
+  const clientVirtualDepth = whereUsesJoinField(this, args.collection, args.where) ? 1 : 3
   let workingDocs = needsClientVirtualHandling
     ? await transformRelationshipReads(this, args.collection, structuredClone(baseDocs), Math.max(getDepth(args as never), clientVirtualDepth), (args as Record<string, unknown>).joins as never)
     : normalized

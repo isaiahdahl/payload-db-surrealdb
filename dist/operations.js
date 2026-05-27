@@ -972,7 +972,7 @@ export const find = async function find(args) {
     let normalized = needsClientVirtualHandling
         ? baseDocs
         : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args), args.joins);
-    const clientVirtualDepth = whereUsesJoinField(this, args.collection, args.where) ? 1 : 2;
+    const clientVirtualDepth = whereUsesJoinField(this, args.collection, args.where) ? 1 : 3;
     let workingDocs = needsClientVirtualHandling
         ? await transformRelationshipReads(this, args.collection, structuredClone(baseDocs), Math.max(getDepth(args), clientVirtualDepth), args.joins)
         : normalized;
