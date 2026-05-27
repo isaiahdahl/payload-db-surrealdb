@@ -164,16 +164,22 @@ const pointInPolygon = (value, polygon) => {
     }
     return inside;
 };
-const matchesOperator = (actual, operator, expected) => {
+const shouldUseExactArrayContains = (adapter, collection, path) => {
+    const field = pathRootField(adapter, collection, path);
+    return Boolean(field?.hasMany && (field.type === 'select' || field.type === 'relationship' || field.type === 'upload'));
+};
+const matchesOperator = (actual, operator, expected, exactArrayContains = false) => {
     expected = expected === 'null' ? null : expected;
     const actualValues = Array.isArray(actual) ? actual : [actual];
     const expectedValues = Array.isArray(expected) ? expected : [expected];
     switch (operator) {
         case 'contains':
             return Array.isArray(actual)
-                ? expectedValues.some((value) => actual.some((item) => (typeof item === 'string' || typeof value === 'string'
-                    ? String(item ?? '').toLowerCase().includes(String(value ?? '').toLowerCase())
-                    : valuesEqual(item, value))))
+                ? expectedValues.some((value) => actual.some((item) => (exactArrayContains
+                    ? valuesEqual(item, value)
+                    : typeof item === 'string' || typeof value === 'string'
+                        ? String(item ?? '').toLowerCase().includes(String(value ?? '').toLowerCase())
+                        : valuesEqual(item, value))))
                 : expectedValues.some((value) => String(actual ?? '').toLowerCase().includes(String(value ?? '').toLowerCase()));
         case 'equals':
             if (expectedValues.some((candidate) => candidate === null))
@@ -199,11 +205,11 @@ const matchesOperator = (actual, operator, expected) => {
             const text = String(actual ?? '').toLowerCase();
             return String(expected ?? '').split(/\s+/).filter(Boolean).every((word) => text.includes(word.toLowerCase()));
         }
-        case 'not_contains': return !matchesOperator(actual, 'contains', expected);
-        case 'not_equals': return !matchesOperator(actual, 'equals', expected);
-        case 'not_in': return !matchesOperator(actual, 'in', expected);
-        case 'not_like': return !matchesOperator(actual, 'like', expected);
-        default: return matchesOperator(actual, 'equals', expected);
+        case 'not_contains': return !matchesOperator(actual, 'contains', expected, exactArrayContains);
+        case 'not_equals': return !matchesOperator(actual, 'equals', expected, exactArrayContains);
+        case 'not_in': return !matchesOperator(actual, 'in', expected, exactArrayContains);
+        case 'not_like': return !matchesOperator(actual, 'like', expected, exactArrayContains);
+        default: return matchesOperator(actual, 'equals', expected, exactArrayContains);
     }
 };
 const getNearConstraint = (where) => {
@@ -251,12 +257,13 @@ const docMatchesWhere = (adapter, collection, doc, where, locale) => {
             return value.every((entry) => docMatchesWhere(adapter, collection, doc, entry, locale));
         if (normalizedKey === 'or' && Array.isArray(value))
             return value.some((entry) => docMatchesWhere(adapter, collection, doc, entry, locale));
+        const exactArrayContains = shouldUseExactArrayContains(adapter, collection, key);
         const path = getVirtualAlias(adapter, collection, key) ?? getLocalizedFieldPath(adapter, collection, key, locale) ?? key.replaceAll('__', '.');
         const actual = resolveLocaleValue(getValueAtPath(doc, path), locale);
         if (value && typeof value === 'object' && !Array.isArray(value)) {
             return Object.entries(value).every(([operator, expected]) => {
                 assertSafeClientQueryValue(key, expected);
-                return matchesOperator(actual, operator, expected);
+                return matchesOperator(actual, operator, expected, exactArrayContains);
             });
         }
         assertSafeClientQueryValue(key, value);
