@@ -895,7 +895,9 @@ export const updateOne = async function updateOne(args) {
     const collectionConfig = getCollectionConfig(this, args.collection);
     const table = getTableName(args.collection, this.tablePrefix);
     const dottedData = Object.fromEntries(Object.entries(args.data).filter(([key]) => key.includes('.')));
-    let data = transformRelationshipWrites(applyDefaults({ ...args.data }, collectionConfig?.fields, { locale: args.locale, req: args.req, user: args.req?.user }), collectionConfig?.fields);
+    let data = transformRelationshipWrites(args.collection === 'payload-jobs'
+        ? { ...args.data }
+        : applyDefaults({ ...args.data }, collectionConfig?.fields, { locale: args.locale, req: args.req, user: args.req?.user }), collectionConfig?.fields);
     Object.assign(data, dottedData);
     const shouldReturn = args.returning !== false;
     delete data.id;
@@ -922,8 +924,16 @@ export const updateOne = async function updateOne(args) {
         const atomicSet = buildAtomicSetSQL(this, args.collection, data);
         if (atomicSet && Object.keys(dottedData).length === 0) {
             const statement = `UPDATE ${getRecordID(table, args.id)} ${atomicSet} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`;
+            const transactionDocs = await getTransactionDocs(this, args.req, args.collection);
+            const transactionDoc = transactionDocs.find((doc) => String(doc.id) === String(args.id));
+            const existing = transactionDoc ? [] : await this.client.query(`SELECT * FROM ${getRecordID(table, args.id)};`);
+            const existingDoc = transactionDoc ?? normalizeDocument(existing[0]) ?? { id: args.id };
             if (await queueTransactionStatement(this, args.req, statement)) {
-                return shouldReturn ? null : null;
+                const snapshotData = removeDottedOperatorKeys(applyAtomicUpdate(data, existingDoc));
+                const snapshot = normalizeDocument({ ...existingDoc, ...snapshotData, id: args.id });
+                await addTransactionDoc(this, args.req, args.collection, snapshot);
+                const docs = applyReadTransforms(this, args.collection, [snapshot], args.locale);
+                return shouldReturn ? applySelect(docs[0] ?? null, args.select) : null;
             }
             try {
                 const result = await this.client.query(statement);
@@ -935,8 +945,10 @@ export const updateOne = async function updateOne(args) {
                 mapWriteError(this, args.collection, error);
             }
         }
-        const existing = await this.client.query(`SELECT * FROM ${getRecordID(table, args.id)};`);
-        const existingDoc = normalizeDocument(existing[0]) ?? { id: args.id };
+        const transactionDocs = await getTransactionDocs(this, args.req, args.collection);
+        const transactionDoc = transactionDocs.find((doc) => String(doc.id) === String(args.id));
+        const existing = transactionDoc ? [] : await this.client.query(`SELECT * FROM ${getRecordID(table, args.id)};`);
+        const existingDoc = transactionDoc ?? normalizeDocument(existing[0]) ?? { id: args.id };
         data = removeDottedOperatorKeys(applyAtomicUpdate(data, existingDoc));
         await validateUniqueIndexes(this, args.collection, data, args.id);
         let publishedLocale = shouldReplacePublishedLocale(args, data);
@@ -1007,15 +1019,36 @@ export const updateOne = async function updateOne(args) {
     }
 };
 export const updateMany = async function updateMany(args) {
+    const isPayloadJobClaim = args.collection === 'payload-jobs' && args.data.processing === true;
+    const table = escapeIdent(getTableName(args.collection, this.tablePrefix));
     const found = await find.call(this, {
         collection: args.collection,
-        limit: args.limit ?? 0,
+        limit: isPayloadJobClaim ? 0 : args.limit ?? 0,
         req: args.req,
         sort: args.sort,
         where: args.where,
     });
+    let docsToUpdate = found.docs;
+    if (isPayloadJobClaim) {
+        const running = await this.client.query(`SELECT concurrencyKey FROM ${table} WHERE processing = true AND concurrencyKey != NONE AND concurrencyKey != NULL;`);
+        const blockedKeys = new Set(running.map((doc) => String(doc.concurrencyKey)).filter(Boolean));
+        const seenKeys = new Set();
+        const claimable = [];
+        for (const doc of docsToUpdate) {
+            const key = doc.concurrencyKey ? String(doc.concurrencyKey) : null;
+            if (key) {
+                if (blockedKeys.has(key) || seenKeys.has(key))
+                    continue;
+                seenKeys.add(key);
+            }
+            claimable.push(doc);
+            if (args.limit && claimable.length >= args.limit)
+                break;
+        }
+        docsToUpdate = claimable;
+    }
     const docs = [];
-    for (const doc of found.docs) {
+    for (const doc of docsToUpdate) {
         docs.push(await updateOne.call(this, { collection: args.collection, data: args.data, id: doc.id, req: args.req, returning: args.returning }));
     }
     return docs;
@@ -1035,6 +1068,9 @@ export const deleteOne = async function deleteOne(args) {
     return args.returning === false ? null : found;
 };
 export const deleteMany = async function deleteMany(args) {
+    if (args.collection === 'payload-jobs' && !args.__payloadJobUpdateLock) {
+        return withPayloadJobUpdateLock('__updateJobs__', () => deleteMany.call(this, { ...args, __payloadJobUpdateLock: true }));
+    }
     const table = escapeIdent(getTableName(args.collection, this.tablePrefix));
     const where = buildRelationshipAwareWhere(this, args.collection, args.where);
     const statement = `DELETE ${table} ${where};`;
