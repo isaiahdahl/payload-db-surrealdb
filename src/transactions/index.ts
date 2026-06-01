@@ -2,6 +2,8 @@ import type { BeginTransaction, CommitTransaction, RollbackTransaction } from 'p
 
 import type { SurrealAdapter } from '../index.js'
 
+import { releasePayloadJobUpdateLocksForTransaction } from '../jobs/updateLock.js'
+
 export type SurrealTransactionSession = {
   createdAt: number
   deletedIDs?: Record<string, Array<number | string>>
@@ -135,11 +137,15 @@ export const commitTransaction: CommitTransaction = async function commitTransac
 
   delete sessions![transactionID]
 
-  if (transaction.statements.length === 0) {
-    return
-  }
+  try {
+    if (transaction.statements.length === 0) {
+      return
+    }
 
-  await this.client.query(`BEGIN TRANSACTION;\n${transaction.statements.join('\n')}\nCOMMIT TRANSACTION;`)
+    await this.client.query(`BEGIN TRANSACTION;\n${transaction.statements.join('\n')}\nCOMMIT TRANSACTION;`)
+  } finally {
+    releasePayloadJobUpdateLocksForTransaction(transactionID)
+  }
 }
 
 export const rollbackTransaction: RollbackTransaction = async function rollbackTransaction(this: SurrealAdapter, incomingID = '') {
@@ -147,8 +153,10 @@ export const rollbackTransaction: RollbackTransaction = async function rollbackT
   const sessions = this.sessions as unknown as Record<string, SurrealTransactionSession> | undefined
 
   if (!sessions?.[transactionID]) {
+    releasePayloadJobUpdateLocksForTransaction(transactionID)
     return
   }
 
   delete sessions[transactionID]
+  releasePayloadJobUpdateLocksForTransaction(transactionID)
 }

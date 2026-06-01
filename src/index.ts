@@ -4,7 +4,7 @@ import type { SurrealClient, SurrealHTTPResult } from './client.js'
 
 import { createClient, SurrealDBError } from './client.js'
 import { createGlobal, findGlobal, updateGlobal } from './globals.js'
-import { withPayloadJobUpdateLock } from './jobs/updateLock.js'
+import { acquirePayloadJobUpdateLock, retainPayloadJobUpdateLockForTransaction } from './jobs/updateLock.js'
 import {
   createMigration,
   migrate,
@@ -25,7 +25,7 @@ import {
   updateOne,
   upsert,
 } from './operations.js'
-import { beginTransaction, commitTransaction, rollbackTransaction } from './transactions/index.js'
+import { beginTransaction, commitTransaction, getTransactionID, rollbackTransaction } from './transactions/index.js'
 import { getCollectionConfig, getIndexedFields, getValueAtPath } from './utilities/fields.js'
 import { transformRelationshipReads } from './utilities/relationships.js'
 import { escapeIdent, getRecordID, getTableName, literal, normalizeDocument } from './utilities/sql.js'
@@ -478,14 +478,31 @@ const execute = async function execute(this: SurrealAdapter, args: { raw?: strin
 }
 
 const updateJobs: UpdateJobs = async function updateJobs(this: SurrealAdapter, args) {
-  return withPayloadJobUpdateLock('__updateJobs__', () => updateMany.call(this, {
-    collection: 'payload-jobs',
-    data: args.data,
-    limit: 'limit' in args ? args.limit : undefined,
-    req: args.req,
-    sort: 'sort' in args ? args.sort : undefined,
-    where: 'where' in args ? args.where : { id: { equals: args.id } },
-  })) as never
+  const release = await acquirePayloadJobUpdateLock('__updateJobs__')
+  let releaseNow = true
+
+  try {
+    const docs = await updateMany.call(this, {
+      collection: 'payload-jobs',
+      data: args.data,
+      limit: 'limit' in args ? args.limit : undefined,
+      req: args.req,
+      sort: 'sort' in args ? args.sort : undefined,
+      where: 'where' in args ? args.where : { id: { equals: args.id } },
+    })
+
+    const transactionID = await getTransactionID(args.req)
+    if (transactionID) {
+      retainPayloadJobUpdateLockForTransaction(transactionID, release)
+      releaseNow = false
+    }
+
+    return docs
+  } finally {
+    if (releaseNow) {
+      release()
+    }
+  }
 }
 
 export function surrealAdapter(args: SurrealAdapterArgs = {}): DatabaseAdapterObj<SurrealAdapter> {

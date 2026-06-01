@@ -1,9 +1,9 @@
 import { createClient, SurrealDBError } from './client.js';
 import { createGlobal, findGlobal, updateGlobal } from './globals.js';
-import { withPayloadJobUpdateLock } from './jobs/updateLock.js';
+import { acquirePayloadJobUpdateLock, retainPayloadJobUpdateLockForTransaction } from './jobs/updateLock.js';
 import { createMigration, migrate, migrateDown, migrateFresh, migrateRefresh, migrateReset, migrateStatus, } from './migrations.js';
 import { count, create, deleteMany, deleteOne, find, findOne, updateMany, updateOne, upsert, } from './operations.js';
-import { beginTransaction, commitTransaction, rollbackTransaction } from './transactions/index.js';
+import { beginTransaction, commitTransaction, getTransactionID, rollbackTransaction } from './transactions/index.js';
 import { getCollectionConfig, getIndexedFields } from './utilities/fields.js';
 import { transformRelationshipReads } from './utilities/relationships.js';
 import { escapeIdent, getRecordID, getTableName, literal, normalizeDocument } from './utilities/sql.js';
@@ -371,14 +371,29 @@ const execute = async function execute(args) {
     return { rows: [] };
 };
 const updateJobs = async function updateJobs(args) {
-    return withPayloadJobUpdateLock('__updateJobs__', () => updateMany.call(this, {
-        collection: 'payload-jobs',
-        data: args.data,
-        limit: 'limit' in args ? args.limit : undefined,
-        req: args.req,
-        sort: 'sort' in args ? args.sort : undefined,
-        where: 'where' in args ? args.where : { id: { equals: args.id } },
-    }));
+    const release = await acquirePayloadJobUpdateLock('__updateJobs__');
+    let releaseNow = true;
+    try {
+        const docs = await updateMany.call(this, {
+            collection: 'payload-jobs',
+            data: args.data,
+            limit: 'limit' in args ? args.limit : undefined,
+            req: args.req,
+            sort: 'sort' in args ? args.sort : undefined,
+            where: 'where' in args ? args.where : { id: { equals: args.id } },
+        });
+        const transactionID = await getTransactionID(args.req);
+        if (transactionID) {
+            retainPayloadJobUpdateLockForTransaction(transactionID, release);
+            releaseNow = false;
+        }
+        return docs;
+    }
+    finally {
+        if (releaseNow) {
+            release();
+        }
+    }
 };
 export function surrealAdapter(args = {}) {
     function adapter({ payload }) {

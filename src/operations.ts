@@ -97,13 +97,75 @@ const isRelationshipPath = (adapter: SurrealAdapter, collection: string, path: s
   return field?.type === 'relationship' || field?.type === 'upload'
 }
 
+const getNestedFieldsForQuery = (field: any): any[] => {
+  if (field.type === 'tabs') return (field.tabs ?? []).flatMap((tab: any) => tab.fields ?? [])
+  if (field.type === 'blocks') return (field.blocks ?? []).flatMap((block: any) => block.fields ?? [])
+  return field.fields ?? []
+}
+
+const pathUsesArrayLikeStorage = (adapter: SurrealAdapter, collection: string, path: string): boolean => {
+  const parts = path.replaceAll('__', '.').split('.').filter(Boolean)
+  const [root, ...rest] = parts
+
+  if (root === 'version') {
+    const baseCollection = getVersionBaseCollection(adapter, collection)
+    return baseCollection ? pathUsesArrayLikeStorage(adapter, baseCollection, rest.join('.')) : false
+  }
+
+  const baseCollection = getVersionBaseCollection(adapter, collection)
+  if (baseCollection) return pathUsesArrayLikeStorage(adapter, baseCollection, path)
+
+  let fields = getCollectionConfig(adapter, collection)?.fields ?? []
+
+  for (const [index, part] of parts.entries()) {
+    const field = fields.find((item: { name?: string }) => item.name === part) as any
+
+    if (!field) {
+      const tab = fields
+        .filter((item: any) => item.type === 'tabs')
+        .flatMap((item: any) => item.tabs ?? [])
+        .find((item: { name?: string }) => item.name === part) as any
+
+      if (tab) {
+        fields = tab.fields ?? []
+        continue
+      }
+
+      const unnamedNested = fields.flatMap((item: any) => !item.name && item.fields ? item.fields : [])
+      const nestedField = unnamedNested.find((item: { name?: string }) => item.name === part) as any
+
+      if (nestedField) {
+        if (nestedField.hasMany || nestedField.type === 'array' || nestedField.type === 'blocks' || nestedField.type === 'json') {
+          return true
+        }
+        fields = getNestedFieldsForQuery(nestedField)
+        continue
+      }
+
+      return false
+    }
+
+    if (field.hasMany || field.type === 'array' || field.type === 'blocks' || field.type === 'json') {
+      return true
+    }
+
+    if ((field.type === 'relationship' || field.type === 'upload') && index < parts.length - 1) {
+      return true
+    }
+
+    fields = getNestedFieldsForQuery(field)
+  }
+
+  return false
+}
+
 const whereUsesVirtual = (adapter: SurrealAdapter, collection: string, where: unknown): boolean => {
   if (!where || typeof where !== 'object' || Array.isArray(where)) return false
   return Object.entries(where as Record<string, unknown>).some(([key, value]) => {
     const normalizedKey = key.toLowerCase()
     if ((normalizedKey === 'and' || normalizedKey === 'or') && Array.isArray(value)) return value.some((entry) => whereUsesVirtual(adapter, collection, entry))
     const usesClientOperator = value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).some((operator) => operator === 'near' || operator === 'within' || operator === 'intersects')
-    return usesClientOperator || Boolean(pathRootField(adapter, collection, key)?.hasMany) || key.includes('.') || key.includes('__') || Boolean(getVirtualAlias(adapter, collection, key)) || whereUsesLocalizedFields(adapter, collection, { [key]: value }) || isLocalizedRelationshipField(adapter, collection, key) || isRelationshipPath(adapter, collection, key)
+    return usesClientOperator || pathContainsJoinField(adapter, collection, key) || pathUsesArrayLikeStorage(adapter, collection, key) || Boolean(pathRootField(adapter, collection, key)?.hasMany) || key.includes('__') || Boolean(getVirtualAlias(adapter, collection, key)) || whereUsesLocalizedFields(adapter, collection, { [key]: value }) || isLocalizedRelationshipField(adapter, collection, key) || isRelationshipPath(adapter, collection, key)
   })
 }
 
@@ -873,6 +935,30 @@ export const findOne: FindOne = (async function findOne(this: SurrealAdapter, ar
 
 export const find: Find = async function find(this: SurrealAdapter, args) {
   const table = escapeIdent(getTableName(args.collection, this.tablePrefix))
+
+  if (
+    args.collection === 'payload-jobs' &&
+    args.limit === 0 &&
+    (args as Record<string, unknown>).pagination === false &&
+    (args.select as Record<string, unknown> | undefined)?.concurrencyKey === true &&
+    JSON.stringify(args.where ?? {}).includes('processing') &&
+    JSON.stringify(args.where ?? {}).includes('concurrencyKey')
+  ) {
+    const docs = await this.client.query<Record<string, unknown>[]>(`SELECT concurrencyKey FROM ${table} WHERE processing = true AND concurrencyKey != NONE AND concurrencyKey != NULL;`)
+    return {
+      docs: normalizeDocs(docs) as Record<string, unknown>[],
+      hasNextPage: false,
+      hasPrevPage: false,
+      limit: 0,
+      nextPage: null,
+      page: 1,
+      pagingCounter: docs.length > 0 ? 1 : 0,
+      prevPage: null,
+      totalDocs: docs.length,
+      totalPages: 1,
+    } as never
+  }
+
   const pagination = getPagination(args)
   const maxLimit = getCollectionConfig(this, args.collection)?.maxLimit as number | undefined
   const limit = pagination.limit === 0 && maxLimit ? maxLimit : pagination.limit

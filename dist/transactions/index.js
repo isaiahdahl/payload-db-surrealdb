@@ -1,3 +1,4 @@
+import { releasePayloadJobUpdateLocksForTransaction } from '../jobs/updateLock.js';
 const randomID = () => {
     const crypto = globalThis.crypto;
     return crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -78,16 +79,23 @@ export const commitTransaction = async function commitTransaction(incomingID = '
         return;
     }
     delete sessions[transactionID];
-    if (transaction.statements.length === 0) {
-        return;
+    try {
+        if (transaction.statements.length === 0) {
+            return;
+        }
+        await this.client.query(`BEGIN TRANSACTION;\n${transaction.statements.join('\n')}\nCOMMIT TRANSACTION;`);
     }
-    await this.client.query(`BEGIN TRANSACTION;\n${transaction.statements.join('\n')}\nCOMMIT TRANSACTION;`);
+    finally {
+        releasePayloadJobUpdateLocksForTransaction(transactionID);
+    }
 };
 export const rollbackTransaction = async function rollbackTransaction(incomingID = '') {
     const transactionID = String(await incomingID);
     const sessions = this.sessions;
     if (!sessions?.[transactionID]) {
+        releasePayloadJobUpdateLocksForTransaction(transactionID);
         return;
     }
     delete sessions[transactionID];
+    releasePayloadJobUpdateLocksForTransaction(transactionID);
 };

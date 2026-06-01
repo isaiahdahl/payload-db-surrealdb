@@ -64,6 +64,56 @@ const isRelationshipPath = (adapter, collection, path) => {
     const field = getCollectionConfig(adapter, collection)?.fields?.find((item) => item.name === root);
     return field?.type === 'relationship' || field?.type === 'upload';
 };
+const getNestedFieldsForQuery = (field) => {
+    if (field.type === 'tabs')
+        return (field.tabs ?? []).flatMap((tab) => tab.fields ?? []);
+    if (field.type === 'blocks')
+        return (field.blocks ?? []).flatMap((block) => block.fields ?? []);
+    return field.fields ?? [];
+};
+const pathUsesArrayLikeStorage = (adapter, collection, path) => {
+    const parts = path.replaceAll('__', '.').split('.').filter(Boolean);
+    const [root, ...rest] = parts;
+    if (root === 'version') {
+        const baseCollection = getVersionBaseCollection(adapter, collection);
+        return baseCollection ? pathUsesArrayLikeStorage(adapter, baseCollection, rest.join('.')) : false;
+    }
+    const baseCollection = getVersionBaseCollection(adapter, collection);
+    if (baseCollection)
+        return pathUsesArrayLikeStorage(adapter, baseCollection, path);
+    let fields = getCollectionConfig(adapter, collection)?.fields ?? [];
+    for (const [index, part] of parts.entries()) {
+        const field = fields.find((item) => item.name === part);
+        if (!field) {
+            const tab = fields
+                .filter((item) => item.type === 'tabs')
+                .flatMap((item) => item.tabs ?? [])
+                .find((item) => item.name === part);
+            if (tab) {
+                fields = tab.fields ?? [];
+                continue;
+            }
+            const unnamedNested = fields.flatMap((item) => !item.name && item.fields ? item.fields : []);
+            const nestedField = unnamedNested.find((item) => item.name === part);
+            if (nestedField) {
+                if (nestedField.hasMany || nestedField.type === 'array' || nestedField.type === 'blocks' || nestedField.type === 'json') {
+                    return true;
+                }
+                fields = getNestedFieldsForQuery(nestedField);
+                continue;
+            }
+            return false;
+        }
+        if (field.hasMany || field.type === 'array' || field.type === 'blocks' || field.type === 'json') {
+            return true;
+        }
+        if ((field.type === 'relationship' || field.type === 'upload') && index < parts.length - 1) {
+            return true;
+        }
+        fields = getNestedFieldsForQuery(field);
+    }
+    return false;
+};
 const whereUsesVirtual = (adapter, collection, where) => {
     if (!where || typeof where !== 'object' || Array.isArray(where))
         return false;
@@ -72,7 +122,7 @@ const whereUsesVirtual = (adapter, collection, where) => {
         if ((normalizedKey === 'and' || normalizedKey === 'or') && Array.isArray(value))
             return value.some((entry) => whereUsesVirtual(adapter, collection, entry));
         const usesClientOperator = value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value).some((operator) => operator === 'near' || operator === 'within' || operator === 'intersects');
-        return usesClientOperator || Boolean(pathRootField(adapter, collection, key)?.hasMany) || key.includes('.') || key.includes('__') || Boolean(getVirtualAlias(adapter, collection, key)) || whereUsesLocalizedFields(adapter, collection, { [key]: value }) || isLocalizedRelationshipField(adapter, collection, key) || isRelationshipPath(adapter, collection, key);
+        return usesClientOperator || pathContainsJoinField(adapter, collection, key) || pathUsesArrayLikeStorage(adapter, collection, key) || Boolean(pathRootField(adapter, collection, key)?.hasMany) || key.includes('__') || Boolean(getVirtualAlias(adapter, collection, key)) || whereUsesLocalizedFields(adapter, collection, { [key]: value }) || isLocalizedRelationshipField(adapter, collection, key) || isRelationshipPath(adapter, collection, key);
     });
 };
 const sortUsesVirtual = (adapter, collection, sort) => sortValues(sort).some((value) => {
@@ -778,6 +828,26 @@ export const findOne = (async function findOne(args) {
 });
 export const find = async function find(args) {
     const table = escapeIdent(getTableName(args.collection, this.tablePrefix));
+    if (args.collection === 'payload-jobs' &&
+        args.limit === 0 &&
+        args.pagination === false &&
+        args.select?.concurrencyKey === true &&
+        JSON.stringify(args.where ?? {}).includes('processing') &&
+        JSON.stringify(args.where ?? {}).includes('concurrencyKey')) {
+        const docs = await this.client.query(`SELECT concurrencyKey FROM ${table} WHERE processing = true AND concurrencyKey != NONE AND concurrencyKey != NULL;`);
+        return {
+            docs: normalizeDocs(docs),
+            hasNextPage: false,
+            hasPrevPage: false,
+            limit: 0,
+            nextPage: null,
+            page: 1,
+            pagingCounter: docs.length > 0 ? 1 : 0,
+            prevPage: null,
+            totalDocs: docs.length,
+            totalPages: 1,
+        };
+    }
     const pagination = getPagination(args);
     const maxLimit = getCollectionConfig(this, args.collection)?.maxLimit;
     const limit = pagination.limit === 0 && maxLimit ? maxLimit : pagination.limit;

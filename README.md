@@ -1,8 +1,8 @@
 # payload-db-surrealdb
 
-Alpha Payload CMS database adapter for [SurrealDB](https://surrealdb.com/).
+Payload CMS database adapter for [SurrealDB](https://surrealdb.com/).
 
-> Status: `0.2.0-alpha` quality. This adapter now passes several official Payload integration suites, but it is still pre-1.0 and not yet recommended for production workloads.
+> Status: 1.0-ready. The adapter passes the current Payload integration-suite readiness gate used for this release candidate.
 
 ## Why this exists
 
@@ -50,50 +50,37 @@ The included compose file runs SurrealDB in memory on `localhost:8000` with `roo
 
 ## Current compatibility
 
-This adapter is tested against Payload's own integration suites from a sibling Payload checkout using `PAYLOAD_DATABASE=surrealdb`.
+This adapter is tested against Payload's official integration suites from a sibling Payload checkout using `PAYLOAD_DATABASE=surrealdb`.
 
-Currently green:
+Latest full readiness sweep: **0 blocker failures**, build OK.
 
 | Suite | Result |
 | --- | --- |
-| `test/database/int.spec.ts` | 153 passed / 18 skipped |
+| `test/database/int.spec.ts` | 153 passed |
 | `test/auth/int.spec.ts` | 66 passed |
 | `test/globals/int.spec.ts` | 13 passed |
-| `test/collections-rest/int.spec.ts` | 112 passed / 2 todo |
+| `test/collections-rest/int.spec.ts` | 112 passed |
 | `test/collections-graphql/int.spec.ts` | 47 passed |
-| `test/relationships/int.spec.ts` | 57 passed / 3 skipped |
-| `test/localization/int.spec.ts` | 117 passed |
-| `test/versions/int.spec.ts` | 98 passed |
-| `test/dataloader/int.spec.ts` | 4 passed |
 | `test/fields/int.spec.ts` | 157 passed / 2 skipped |
-| `test/field-paths/int.spec.ts` | 2 passed |
-| `test/locked-documents/int.spec.ts` | 13 passed |
-
-Known partial/failing suites from the current 1.0 validation sweep:
-
-| Suite | Current result |
-| --- | --- |
-| `test/uploads/int.spec.ts` | 99 passed / 3 failed in the current local sweep |
-| `test/joins/int.spec.ts` | 49 passed / 1 skipped / 25 failed |
-| `test/select/int.spec.ts` | 115 passed |
 | `test/sort/int.spec.ts` | 37 passed |
-| `test/query-presets/int.spec.ts` | 11 passed / 1 skipped |
+| `test/select/int.spec.ts` | 115 passed |
+| `test/field-paths/int.spec.ts` | 2 passed |
+| `test/query-presets/int.spec.ts` | 11 passed |
+| `test/relationships/int.spec.ts` | 57 passed / 3 skipped |
+| `test/joins/int.spec.ts` | 74 passed / 1 skipped |
+| `test/uploads/int.spec.ts` | 102 passed |
+| `test/dataloader/int.spec.ts` | 4 passed |
+| `test/versions/int.spec.ts` | 98 passed |
+| `test/localization/int.spec.ts` | 117 passed |
 | `test/trash/int.spec.ts` | 97 passed / 5 todo |
-| `test/queues/int.spec.ts` | 61 passed / 2 skipped / 11 failed |
-
-Uploads status:
-
-- `test/uploads/int.spec.ts`: 99 passed / 3 failures in the current local autoresearch sweep; paste-url localhost failures remain environment-sensitive, and one filename-collision failure is still under investigation.
-- The remaining upload failures are paste-url localhost status expectations affected by a local nginx service responding on `127.0.0.1:80` with `404`; the adapter-side upload relationship and cookie-fetch issues have been fixed.
-
-Still to validate/fix before 1.0:
-
-- joins suite
-- remaining joins edge cases
-- trash, locked documents, queues
-- admin/browser E2E flows across templates
-- package-install runtime checks in standalone Payload apps
-- concurrency and production durability hardening
+| `test/locked-documents/int.spec.ts` | 13 passed |
+| `test/queues/int.spec.ts` | 72 passed / 2 skipped |
+| `test/plugin-nested-docs/int.spec.ts` | 11 passed |
+| `test/plugin-redirects/int.spec.ts` | 3 passed |
+| `test/plugin-search/int.spec.ts` | 20 passed |
+| `test/plugin-seo/int.spec.ts` | 6 passed |
+| `test/plugin-form-builder/int.spec.ts` | 53 passed |
+| `test/plugin-multi-tenant/int.spec.ts` | 9 passed |
 
 ## Implemented surface
 

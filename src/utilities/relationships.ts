@@ -566,10 +566,17 @@ const flattenJoinValues = (value: unknown, localeCodes: string[] = [], defaultLo
   }
 
   if (isPlainObject(value)) {
-    const localeValue = pickLocaleWrapperValue(value, localeCodes, activeLocale, defaultLocale)
-    return localeValue !== undefined
-      ? flattenJoinValues(localeValue, localeCodes, defaultLocale, activeLocale)
-      : Object.values(value).flatMap((item) => flattenJoinValues(item, localeCodes, defaultLocale, activeLocale))
+    const hasLocaleKeys = localeCodes.some((locale) => locale in value)
+    if (hasLocaleKeys) {
+      if (activeLocale === 'all') {
+        return localeCodes.flatMap((locale) => locale in value ? flattenJoinValues(value[locale], localeCodes, defaultLocale, activeLocale) : [])
+      }
+      const locale = activeLocale || defaultLocale
+      return locale && locale in value
+        ? flattenJoinValues(value[locale], localeCodes, defaultLocale, activeLocale)
+        : []
+    }
+    return Object.values(value).flatMap((item) => flattenJoinValues(item, localeCodes, defaultLocale, activeLocale))
   }
 
   return value === null || value === undefined ? [] : [value]
