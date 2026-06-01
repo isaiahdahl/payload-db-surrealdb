@@ -84,7 +84,7 @@ Latest full readiness sweep: **0 blocker failures**, build OK.
 
 ## Implemented surface
 
-Current alpha functionality includes:
+Current functionality includes:
 
 - `surrealAdapter()` Payload database adapter factory
 - SurrealDB HTTP `/sql` client using Node `fetch`
@@ -109,15 +109,12 @@ Current alpha functionality includes:
 
 ## Known limitations
 
-This is not production ready. Important remaining gaps include:
+Important remaining caveats for production use:
 
-- no long-lived interactive SurrealDB transaction session over HTTP; writes are queued and committed atomically, but semantics are not yet equivalent to mature SQL adapters in every edge case
-- join fields need broader conformance, especially polymorphic joins and advanced pagination/filtering
-- select projections, multi-field sort parity, join where/access/localization/version edges, and queue/trash behavior still need broader suite hardening
-- unique indexes and duplicate error mapping need more concurrency validation
-- migrations are intentionally lightweight and schemaless, not a full schema-diff system
-- performance and N+1 characteristics need profiling under real admin/API workloads
-- full Payload test-suite parity is not complete
+- SurrealDB HTTP does not provide a long-lived interactive transaction session here; adapter writes are queued and committed atomically for Payload request transactions.
+- Migrations are intentionally lightweight and schemaless, not a full relational schema-diff system.
+- Performance and N+1 characteristics should be profiled under your real admin/API workload.
+- Validate your own storage, backup, and SurrealDB deployment topology before production rollout.
 
 ## Demo app
 
@@ -202,14 +199,12 @@ npm run smoke:demo -- --project=chromium
 
 See [`docs/validation-harness.md`](./docs/validation-harness.md) for template validation commands and the compatibility matrix for `examples/basic`, Payload blank, website, and ecommerce.
 
-## Publishing status
+## Publishing
 
-`0.x` releases are alpha/experimental. Breaking changes should be expected until the adapter passes broad Payload conformance suites and demo/template E2E validation.
-
-Recommended publish command for this release:
+Recommended publish command for the 1.0 release:
 
 ```bash
-npm publish --tag alpha --access public
+npm publish --access public
 ```
 
 ## License
