@@ -1,6 +1,6 @@
 # payload-db-surrealdb 1.0 Readiness
 
-`payload-db-surrealdb` is ready for the 1.0 npm release candidate.
+`payload-db-surrealdb` is ready for the 1.0 beta npm release candidate.
 
 ## Final readiness result
 
@@ -45,8 +45,8 @@ Green suites in the final sweep:
 
 - [x] Build passes with `npm run build`.
 - [x] Full readiness sweep passes with zero blocker failures.
-- [x] Package metadata bumped to `1.0.0`.
-- [x] `publishConfig.tag` set to `latest`.
+- [x] Package metadata bumped to `1.0.0-beta.1`.
+- [x] `publishConfig.tag` set to `beta`.
 - [x] Autoresearch artifacts removed from the repository.
 - [x] `npm pack --dry-run` succeeds.
 
@@ -54,8 +54,8 @@ Green suites in the final sweep:
 
 ```bash
 git push origin main
-git push origin v1.0.0
-npm publish --access public
+git push origin v1.0.0-beta.1
+npm publish --tag beta --access public
 ```
 
 ## Remaining post-1.0 hardening

@@ -2,7 +2,7 @@
 
 Payload CMS database adapter for [SurrealDB](https://surrealdb.com/).
 
-> Status: 1.0-ready. The adapter passes the current Payload integration-suite readiness gate used for this release candidate.
+> Status: 1.0 beta. The adapter passes the current Payload integration-suite readiness gate and is ready for production pilots before a stable 1.0 release.
 
 ## Why this exists
 
@@ -201,10 +201,10 @@ See [`docs/validation-harness.md`](./docs/validation-harness.md) for template va
 
 ## Publishing
 
-Recommended publish command for the 1.0 release:
+Recommended publish command for the 1.0 beta release:
 
 ```bash
-npm publish --access public
+npm publish --tag beta --access public
 ```
 
 ## License
