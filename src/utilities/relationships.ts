@@ -21,6 +21,7 @@ type Field = {
   relationTo?: string | string[]
   sort?: string | string[]
   defaultSort?: string | string[]
+  where?: unknown
   tabs?: Array<{
     fields?: Field[]
     localized?: boolean
@@ -205,15 +206,17 @@ const compareValues = (a: unknown, b: unknown): number => {
   if (a === b) return 0
   if (a === null || a === undefined) return 1
   if (b === null || b === undefined) return -1
-  return String(a).localeCompare(String(b), undefined, { numeric: true })
+  return String(a).localeCompare(String(b))
 }
 
 const sortJoinDocs = (docs: Record<string, unknown>[], sort?: string | string[]): Record<string, unknown>[] => {
   const values = sortValues(sort).length ? sortValues(sort) : ['-createdAt']
 
   return [...docs].sort((a, b) => {
+    let lastDirection = 1
     for (const sortValue of values) {
       const direction = sortValue.startsWith('-') ? -1 : 1
+      lastDirection = direction
       const path = sortValue.replace(/^-|^\+/, '')
       const aValue = getValueAtPath('value' in a && 'relationTo' in a ? a.value as Record<string, unknown> : a, path)
       const bValue = getValueAtPath('value' in b && 'relationTo' in b ? b.value as Record<string, unknown> : b, path)
@@ -221,10 +224,34 @@ const sortJoinDocs = (docs: Record<string, unknown>[], sort?: string | string[])
       if (result !== 0) return direction * result
     }
 
-    if ('relationTo' in a && 'relationTo' in b) return compareValues(b.relationTo, a.relationTo)
+    if ('relationTo' in a && 'relationTo' in b) return lastDirection * compareValues(a.relationTo, b.relationTo)
 
     return 0
   })
+}
+
+const filterJoinWhereForCollection = (where: unknown, collection: string): unknown => {
+  if (!isPlainObject(where)) return where
+
+  const entries = Object.entries(where).flatMap(([key, value]): Array<[string, unknown]> => {
+    if ((key === 'and' || key === 'or') && Array.isArray(value)) {
+      const filtered = value
+        .map((entry) => filterJoinWhereForCollection(entry, collection))
+        .filter((entry) => isPlainObject(entry) && Object.keys(entry).length > 0)
+      return filtered.length ? [[key, filtered]] : []
+    }
+
+    if (key !== 'relationTo') return [[key, value]]
+
+    if (!isPlainObject(value)) return []
+    const equals = value.equals
+    const inValue = value.in
+    const matches = equals === collection || (Array.isArray(inValue) && inValue.includes(collection))
+
+    return matches ? [] : [['id', { equals: null }]]
+  })
+
+  return Object.fromEntries(entries)
 }
 
 const getSortSQL = (sort?: string | string[]): string => {
@@ -468,7 +495,26 @@ const populateRelationshipFields = async (
   await populateFields(docs, getCollectionConfig(adapter, collection)?.fields)
 }
 
-const getValueAtPath = (value: unknown, path: string): unknown => {
+const getLocaleCodes = (adapter: SurrealAdapter): string[] => {
+  const localization = adapter.payload.config.localization
+  const locales = typeof localization === 'object' && Array.isArray(localization.locales) ? localization.locales : []
+  return locales.map((locale: any) => typeof locale === 'string' ? locale : locale.code).filter(Boolean)
+}
+
+const getDefaultLocale = (adapter: SurrealAdapter): string | undefined => {
+  const localization = adapter.payload.config.localization
+  return typeof localization === 'object' ? localization.defaultLocale : undefined
+}
+
+const pickLocaleWrapperValue = (value: Record<string, unknown>, localeCodes: string[], activeLocale?: string, defaultLocale?: string): unknown => {
+  if (!localeCodes.some((locale) => locale in value)) return undefined
+  if (activeLocale && activeLocale !== 'all' && activeLocale in value) return value[activeLocale]
+  if (defaultLocale && defaultLocale in value) return value[defaultLocale]
+  const first = localeCodes.find((locale) => locale in value)
+  return first ? value[first] : undefined
+}
+
+const getValueAtPath = (value: unknown, path: string, localeCodes: string[] = [], defaultLocale?: string, activeLocale?: string): unknown => {
   const [head, ...tail] = path.split('.').filter(Boolean)
 
   if (!head) {
@@ -476,14 +522,19 @@ const getValueAtPath = (value: unknown, path: string): unknown => {
   }
 
   if (Array.isArray(value)) {
-    return value.map((item) => getValueAtPath(item, path))
+    return value.map((item) => getValueAtPath(item, path, localeCodes, defaultLocale, activeLocale))
   }
 
   if (!isPlainObject(value)) {
     return undefined
   }
 
-  return getValueAtPath(value[head], tail.join('.'))
+  if (!(head in value)) {
+    const localeValue = pickLocaleWrapperValue(value, localeCodes, activeLocale, defaultLocale)
+    if (localeValue !== undefined) return getValueAtPath(localeValue, path, localeCodes, defaultLocale, activeLocale)
+  }
+
+  return getValueAtPath(value[head], tail.join('.'), localeCodes, defaultLocale, activeLocale)
 }
 
 const setValueAtPath = (doc: Record<string, unknown>, path: string, value: unknown): void => {
@@ -505,17 +556,27 @@ const setValueAtPath = (doc: Record<string, unknown>, path: string, value: unkno
   target[last] = value
 }
 
-const flattenJoinValues = (value: unknown): unknown[] => {
+const flattenJoinValues = (value: unknown, localeCodes: string[] = [], defaultLocale?: string, activeLocale?: string): unknown[] => {
   if (Array.isArray(value)) {
-    return value.flatMap(flattenJoinValues)
+    return value.flatMap((item) => flattenJoinValues(item, localeCodes, defaultLocale, activeLocale))
   }
 
   if (isPlainObject(value) && 'value' in value) {
-    return flattenJoinValues(value.value)
+    return flattenJoinValues(value.value, localeCodes, defaultLocale, activeLocale)
   }
 
   if (isPlainObject(value)) {
-    return Object.values(value).flatMap(flattenJoinValues)
+    const hasLocaleKeys = localeCodes.some((locale) => locale in value)
+    if (hasLocaleKeys) {
+      if (activeLocale === 'all') {
+        return localeCodes.flatMap((locale) => locale in value ? flattenJoinValues(value[locale], localeCodes, defaultLocale, activeLocale) : [])
+      }
+      const locale = activeLocale || defaultLocale
+      return locale && locale in value
+        ? flattenJoinValues(value[locale], localeCodes, defaultLocale, activeLocale)
+        : []
+    }
+    return Object.values(value).flatMap((item) => flattenJoinValues(item, localeCodes, defaultLocale, activeLocale))
   }
 
   return value === null || value === undefined ? [] : [value]
@@ -527,6 +588,7 @@ const resolveJoinFields = async (
   docs: Record<string, unknown>[],
   depth: number,
   joins?: Record<string, { limit?: number; page?: number; sort?: string | string[] } | false>,
+  locale?: string,
 ): Promise<void> => {
   if (!docs.length) {
     return
@@ -534,6 +596,8 @@ const resolveJoinFields = async (
 
   const joinFields = collectJoinFields(getCollectionConfig(adapter, collection)?.fields)
   const parentIDs = docs.map((doc) => doc.id).filter((id) => id !== null && id !== undefined)
+  const localeCodes = getLocaleCodes(adapter)
+  const defaultLocale = getDefaultLocale(adapter)
 
   for (const field of joinFields) {
     if (!field.name || !field.collection || !field.on || !parentIDs.length) {
@@ -546,7 +610,10 @@ const resolveJoinFields = async (
     }
 
     const limit = joinOptions?.limit ?? field.limit ?? field.defaultLimit ?? 10
+    const page = Math.max(1, Number(joinOptions && 'page' in joinOptions ? joinOptions.page : 1) || 1)
+    const start = limit > 0 ? (page - 1) * limit : 0
     const collections = Array.isArray(field.collection) ? field.collection : [field.collection]
+    const joinWhere = joinOptions && 'where' in joinOptions ? joinOptions.where : field.where
     const sort = getSortSQL(joinOptions?.sort ?? field.sort ?? field.defaultSort)
     const byParent = new Map<string, Record<string, unknown>[]>()
 
@@ -556,16 +623,18 @@ const resolveJoinFields = async (
       }
 
       const targetTable = escapeIdent(targetCollection.replaceAll('-', '_'))
+      const collectionWhere = filterJoinWhereForCollection(joinWhere, targetCollection)
+      const whereSQL = buildWhere(collectionWhere as never, getCollectionConfig(adapter, targetCollection)?.fields)
       const targetDocs = normalizeFetchedDocs(
         await adapter.client.query(
-          `SELECT * FROM ${targetTable} ${sort};`,
+          `SELECT * FROM ${targetTable} ${whereSQL} ${sort};`,
         ) as Record<string, unknown>[],
       )
       const populatedTargets = depth > 0 ? await transformRelationshipReads(adapter, targetCollection, targetDocs, depth - 1) : targetDocs
 
       for (const [index, targetDoc] of targetDocs.entries()) {
-        const foreignValue = getValueAtPath(targetDoc, field.on)
-        const ids = flattenJoinValues(foreignValue)
+        const foreignValue = getValueAtPath(targetDoc, field.on, localeCodes, defaultLocale, locale)
+        const ids = flattenJoinValues(foreignValue, localeCodes, defaultLocale, locale)
         const joinedDoc = Array.isArray(field.collection)
           ? {
               relationTo: targetCollection,
@@ -582,17 +651,17 @@ const resolveJoinFields = async (
 
     for (const doc of docs) {
       const joined = sortJoinDocs(byParent.get(String(doc.id)) ?? [], joinOptions?.sort ?? field.sort ?? field.defaultSort)
-      const pageDocs = limit > 0 ? joined.slice(0, limit) : joined
+      const pageDocs = limit > 0 ? joined.slice(start, start + limit) : joined
       const exposedDocs = field.orderable ? pageDocs.map((pageDoc) => pageDoc.id) : pageDocs
       const value = field.hasMany === false
         ? (exposedDocs[0] ?? null)
         : {
             docs: exposedDocs,
-            hasNextPage: limit > 0 ? joined.length > limit : false,
-            hasPrevPage: false,
+            hasNextPage: limit > 0 ? page * limit < joined.length : false,
+            hasPrevPage: page > 1,
             limit,
-            page: 1,
-            pagingCounter: 1,
+            page,
+            pagingCounter: joined.length > 0 ? start + 1 : 0,
             totalDocs: joined.length,
             totalPages: limit > 0 ? Math.ceil(joined.length / limit) : 1,
           }
@@ -608,9 +677,10 @@ export const transformRelationshipReads = async <T extends Record<string, unknow
   docs: T[],
   depth = 0,
   joins?: Record<string, { limit?: number; page?: number; sort?: string | string[] } | false>,
+  locale?: string,
 ): Promise<T[]> => {
   await populateRelationshipFields(adapter, collection, docs, depth)
-  await resolveJoinFields(adapter, collection, docs, depth, joins)
+  await resolveJoinFields(adapter, collection, docs, depth, joins, locale)
 
   const baseCollection = getVersionBaseCollection(adapter, collection)
   const versionDocs = baseCollection
@@ -619,7 +689,7 @@ export const transformRelationshipReads = async <T extends Record<string, unknow
 
   if (baseCollection && versionDocs.length) {
     await populateRelationshipFields(adapter, baseCollection, versionDocs, depth)
-    await resolveJoinFields(adapter, baseCollection, versionDocs, depth, joins)
+    await resolveJoinFields(adapter, baseCollection, versionDocs, depth, joins, locale)
   }
 
   return docs

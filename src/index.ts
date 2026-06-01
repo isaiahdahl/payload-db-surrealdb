@@ -4,6 +4,7 @@ import type { SurrealClient, SurrealHTTPResult } from './client.js'
 
 import { createClient, SurrealDBError } from './client.js'
 import { createGlobal, findGlobal, updateGlobal } from './globals.js'
+import { acquirePayloadJobUpdateLock, retainPayloadJobUpdateLockForTransaction } from './jobs/updateLock.js'
 import {
   createMigration,
   migrate,
@@ -24,10 +25,10 @@ import {
   updateOne,
   upsert,
 } from './operations.js'
-import { beginTransaction, commitTransaction, rollbackTransaction } from './transactions/index.js'
+import { beginTransaction, commitTransaction, getTransactionID, rollbackTransaction } from './transactions/index.js'
 import { getCollectionConfig, getIndexedFields, getValueAtPath } from './utilities/fields.js'
 import { transformRelationshipReads } from './utilities/relationships.js'
-import { escapeIdent, getTableName } from './utilities/sql.js'
+import { escapeIdent, getRecordID, getTableName, literal, normalizeDocument } from './utilities/sql.js'
 import {
   countGlobalVersions,
   countVersions,
@@ -102,9 +103,43 @@ const buildIndexStatements = (table: string, fields: ReturnType<typeof getIndexe
   })
 }
 
+const refreshDrizzleShim = (adapter: SurrealAdapter): void => {
+  const schema = Object.fromEntries(
+    Object.keys(adapter.tables ?? {}).map((table) => [table, { dbName: table }]),
+  )
+  const query = Object.fromEntries(
+    Object.entries(schema).map(([table, ref]) => [table, { fullSchema: { [table]: ref } }]),
+  )
+
+  ;(adapter as any).drizzle ??= {}
+  ;(adapter as any).drizzle._ = { schema }
+  ;(adapter as any).drizzle.query = query
+  ;(adapter as any).drizzle.select = () => ({
+    from: (table: { dbName?: string }) => ({
+      execute: async () => (await adapter.client.query<Record<string, unknown>[]>(`SELECT * FROM ${escapeIdent(table.dbName ?? '')};`))
+        .map((record) => normalizeDocument(record)),
+    }),
+  })
+  ;(adapter as any).drizzle.insert = (table: { dbName?: string }) => ({
+    values: (records: Record<string, unknown>[]) => ({
+      execute: async () => {
+        for (const record of records) {
+          const id = record.id
+          const data = { ...record }
+          delete (data as any).id
+          const target = id === undefined
+            ? escapeIdent(table.dbName ?? '')
+            : getRecordID(table.dbName ?? '', String(id))
+          await adapter.client.query(`CREATE ${target} CONTENT ${literal(data)} RETURN NONE;`)
+        }
+      },
+    }),
+  })
+}
+
 const normalizeOrderableJoinLocalization = (fields: any[] = []): void => {
   for (const field of fields) {
-    if (field?.type === 'join' && field.orderable) field.localized = false
+    if (field?.type === 'join') field.localized = false
     if (field?.fields) normalizeOrderableJoinLocalization(field.fields)
     if (field?.tabs) for (const tab of field.tabs) normalizeOrderableJoinLocalization(tab.fields ?? [])
     if (field?.blocks) for (const block of field.blocks) normalizeOrderableJoinLocalization(block.fields ?? [])
@@ -179,8 +214,15 @@ const init: NonNullable<BaseDatabaseAdapter['init']> = async function init(this:
   }
 
   for (const table of systemTables) {
-    statements.push(defineTable(getTableName(table, this.tablePrefix)))
+    const tableName = getTableName(table, this.tablePrefix)
+    this.tables[tableName] ??= {}
   }
+
+  for (const table of Object.keys(this.tables)) {
+    statements.push(defineTable(table))
+  }
+
+  refreshDrizzleShim(this)
 
   await this.client.query(statements.join('\n'))
 }
@@ -417,8 +459,15 @@ const findDistinct: FindDistinct = async function findDistinct(this: SurrealAdap
   }
 }
 
-const execute = async function execute(this: SurrealAdapter, args: { raw?: string }) {
+const execute = async function execute(this: SurrealAdapter, args: { raw?: string; sql?: unknown }) {
   const raw = args.raw ?? ''
+
+  if (/DELETE FROM /i.test(raw)) {
+    const statements = [...raw.matchAll(/DELETE FROM\s+([A-Za-z_][A-Za-z0-9_]*)/gi)]
+      .map((match) => `DELETE ${escapeIdent(match[1]!)};`)
+    if (statements.length) await this.client.query(statements.join('\n'))
+    return { rows: [] }
+  }
 
   if (/SELECT \* from places/i.test(raw)) {
     const rows = await this.client.query<Record<string, unknown>[]>(`SELECT * FROM ${escapeIdent(getTableName('places', this.tablePrefix))};`)
@@ -429,14 +478,31 @@ const execute = async function execute(this: SurrealAdapter, args: { raw?: strin
 }
 
 const updateJobs: UpdateJobs = async function updateJobs(this: SurrealAdapter, args) {
-  return updateMany.call(this, {
-    collection: 'payload-jobs',
-    data: args.data,
-    limit: 'limit' in args ? args.limit : undefined,
-    req: args.req,
-    sort: 'sort' in args ? args.sort : undefined,
-    where: 'where' in args ? args.where : { id: { equals: args.id } },
-  }) as never
+  const release = await acquirePayloadJobUpdateLock('__updateJobs__')
+  let releaseNow = true
+
+  try {
+    const docs = await updateMany.call(this, {
+      collection: 'payload-jobs',
+      data: args.data,
+      limit: 'limit' in args ? args.limit : undefined,
+      req: args.req,
+      sort: 'sort' in args ? args.sort : undefined,
+      where: 'where' in args ? args.where : { id: { equals: args.id } },
+    })
+
+    const transactionID = await getTransactionID(args.req)
+    if (transactionID) {
+      retainPayloadJobUpdateLockForTransaction(transactionID, release)
+      releaseNow = false
+    }
+
+    return docs
+  } finally {
+    if (releaseNow) {
+      release()
+    }
+  }
 }
 
 export function surrealAdapter(args: SurrealAdapterArgs = {}): DatabaseAdapterObj<SurrealAdapter> {

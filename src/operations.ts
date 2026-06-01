@@ -15,11 +15,17 @@ import { ValidationError } from 'payload'
 import type { SurrealAdapter } from './index.js'
 
 import { SurrealDBError } from './client.js'
+import { withPayloadJobUpdateLock } from './jobs/updateLock.js'
 import { pathToSQL } from './queries/buildWhere.js'
-import { addTransactionDoc, getTransactionDocs, queueTransactionStatement } from './transactions/index.js'
+import { getAtomicValueAtPath, removeDottedOperatorKeys, setAtomicValueAtPath } from './utilities/atomicUpdate.js'
+import { addTransactionDeletedDocs, addTransactionDoc, getTransactionDeletedIDs, getTransactionDocs, queueTransactionStatement } from './transactions/index.js'
 import { applyDefaults, applySelect, getCollectionConfig, getValueAtPath, hasTimestamps, setValueAtPath } from './utilities/fields.js'
+import { distanceMeters, parseNear, pointInPolygon } from './utilities/geo.js'
+import { getPagination } from './utilities/pagination.js'
 import { buildRelationshipAwareWhere, transformRelationshipReads, transformRelationshipWrites } from './utilities/relationships.js'
 import { escapeIdent, getRecordID, getTableName, literal, normalizeDocument } from './utilities/sql.js'
+import { compareValues, getSortSQL, sortValues, valuesEqual } from './utilities/sort.js'
+import { mergeTransactionDocs } from './utilities/transactionVisibility.js'
 
 const randomID = (): string => {
   const crypto = globalThis.crypto as { randomUUID?: () => string } | undefined
@@ -91,20 +97,77 @@ const isRelationshipPath = (adapter: SurrealAdapter, collection: string, path: s
   return field?.type === 'relationship' || field?.type === 'upload'
 }
 
+const getNestedFieldsForQuery = (field: any): any[] => {
+  if (field.type === 'tabs') return (field.tabs ?? []).flatMap((tab: any) => tab.fields ?? [])
+  if (field.type === 'blocks') return (field.blocks ?? []).flatMap((block: any) => block.fields ?? [])
+  return field.fields ?? []
+}
+
+const pathUsesArrayLikeStorage = (adapter: SurrealAdapter, collection: string, path: string): boolean => {
+  const parts = path.replaceAll('__', '.').split('.').filter(Boolean)
+  const [root, ...rest] = parts
+
+  if (root === 'version') {
+    const baseCollection = getVersionBaseCollection(adapter, collection)
+    return baseCollection ? pathUsesArrayLikeStorage(adapter, baseCollection, rest.join('.')) : false
+  }
+
+  const baseCollection = getVersionBaseCollection(adapter, collection)
+  if (baseCollection) return pathUsesArrayLikeStorage(adapter, baseCollection, path)
+
+  let fields = getCollectionConfig(adapter, collection)?.fields ?? []
+
+  for (const [index, part] of parts.entries()) {
+    const field = fields.find((item: { name?: string }) => item.name === part) as any
+
+    if (!field) {
+      const tab = fields
+        .filter((item: any) => item.type === 'tabs')
+        .flatMap((item: any) => item.tabs ?? [])
+        .find((item: { name?: string }) => item.name === part) as any
+
+      if (tab) {
+        fields = tab.fields ?? []
+        continue
+      }
+
+      const unnamedNested = fields.flatMap((item: any) => !item.name && item.fields ? item.fields : [])
+      const nestedField = unnamedNested.find((item: { name?: string }) => item.name === part) as any
+
+      if (nestedField) {
+        if (nestedField.hasMany || nestedField.type === 'array' || nestedField.type === 'blocks' || nestedField.type === 'json') {
+          return true
+        }
+        fields = getNestedFieldsForQuery(nestedField)
+        continue
+      }
+
+      return false
+    }
+
+    if (field.hasMany || field.type === 'array' || field.type === 'blocks' || field.type === 'json') {
+      return true
+    }
+
+    if ((field.type === 'relationship' || field.type === 'upload') && index < parts.length - 1) {
+      return true
+    }
+
+    fields = getNestedFieldsForQuery(field)
+  }
+
+  return false
+}
+
 const whereUsesVirtual = (adapter: SurrealAdapter, collection: string, where: unknown): boolean => {
   if (!where || typeof where !== 'object' || Array.isArray(where)) return false
   return Object.entries(where as Record<string, unknown>).some(([key, value]) => {
     const normalizedKey = key.toLowerCase()
     if ((normalizedKey === 'and' || normalizedKey === 'or') && Array.isArray(value)) return value.some((entry) => whereUsesVirtual(adapter, collection, entry))
     const usesClientOperator = value && typeof value === 'object' && !Array.isArray(value) && Object.keys(value as Record<string, unknown>).some((operator) => operator === 'near' || operator === 'within' || operator === 'intersects')
-    return usesClientOperator || Boolean(pathRootField(adapter, collection, key)?.hasMany) || key.includes('.') || key.includes('__') || Boolean(getVirtualAlias(adapter, collection, key)) || whereUsesLocalizedFields(adapter, collection, { [key]: value }) || isLocalizedRelationshipField(adapter, collection, key) || isRelationshipPath(adapter, collection, key)
+    return usesClientOperator || pathContainsJoinField(adapter, collection, key) || pathUsesArrayLikeStorage(adapter, collection, key) || Boolean(pathRootField(adapter, collection, key)?.hasMany) || key.includes('__') || Boolean(getVirtualAlias(adapter, collection, key)) || whereUsesLocalizedFields(adapter, collection, { [key]: value }) || isLocalizedRelationshipField(adapter, collection, key) || isRelationshipPath(adapter, collection, key)
   })
 }
-
-const sortValues = (sort?: string | string[]): string[] => (Array.isArray(sort) ? sort : sort ? [sort] : [])
-  .flatMap((value) => String(value).split(','))
-  .map((value) => value.trim())
-  .filter(Boolean)
 
 const sortUsesVirtual = (adapter: SurrealAdapter, collection: string, sort?: string | string[]): boolean =>
   sortValues(sort).some((value) => {
@@ -112,96 +175,14 @@ const sortUsesVirtual = (adapter: SurrealAdapter, collection: string, sort?: str
     return Boolean(getVirtualAlias(adapter, collection, path)) || Boolean(getLocalizedFieldPath(adapter, collection, path)) || isRelationshipPath(adapter, collection, path)
   })
 
-const compareScalarValues = (a: unknown, b: unknown): number => {
-  if (a === b) return 0
-  if (a === null || a === undefined) return 1
-  if (b === null || b === undefined) return -1
-  if (typeof a === 'number' && typeof b === 'number') return a - b
-  return String(a).localeCompare(String(b), undefined, { numeric: true })
-}
-
-const getComparableValue = (value: unknown): unknown => {
-  if (!Array.isArray(value)) {
-    return value
-  }
-
-  const values = value.filter((item) => item !== null && item !== undefined)
-  values.sort(compareScalarValues)
-
-  return values[0]
-}
-
-const normalizeComparableValue = (value: unknown): unknown => {
-  if (value && typeof value === 'object' && !Array.isArray(value)) {
-    const object = value as Record<string, unknown>
-
-    if ('relationTo' in object && 'value' in object) {
-      return { relationTo: object.relationTo, value: normalizeComparableValue(object.value) }
-    }
-
-    if ('id' in object) {
-      return object.id
-    }
-
-    if ('en' in object) {
-      return normalizeComparableValue(object.en)
-    }
-  }
-
-  return value
-}
-
-const compareValues = (a: unknown, b: unknown): number => compareScalarValues(getComparableValue(normalizeComparableValue(a)), getComparableValue(normalizeComparableValue(b)))
-
 const toBoolean = (value: unknown): boolean => value === 'false' ? false : Boolean(value)
 
-const parseNear = (value: unknown): [number, number, number | null, number | null] | null => {
-  const parts = Array.isArray(value) ? value : (typeof value === 'string' ? value.split(',').map((part) => part.trim()) : [])
-  if (parts.length < 2) return null
-  const nums = parts.map((part) => (part === 'null' || part === '' ? null : Number(part)))
-  if (typeof nums[0] !== 'number' || typeof nums[1] !== 'number' || Number.isNaN(nums[0]) || Number.isNaN(nums[1])) return null
-  return [nums[0], nums[1], typeof nums[2] === 'number' && !Number.isNaN(nums[2]) ? nums[2] : null, typeof nums[3] === 'number' && !Number.isNaN(nums[3]) ? nums[3] : null]
+const shouldUseExactArrayContains = (adapter: SurrealAdapter, collection: string, path: string): boolean => {
+  const field = pathRootField(adapter, collection, path)
+  return Boolean(field?.hasMany && (field.type === 'select' || field.type === 'relationship' || field.type === 'upload'))
 }
 
-const getPointCoordinates = (value: unknown): unknown[] | null => {
-  if (Array.isArray(value)) return value
-  if (value && typeof value === 'object' && Array.isArray((value as { coordinates?: unknown }).coordinates)) return (value as { coordinates: unknown[] }).coordinates
-  return null
-}
-
-const distanceMeters = (a: unknown, bLng: number, bLat: number): number => {
-  const point = getPointCoordinates(a)
-  if (!point || point.length < 2) return Number.POSITIVE_INFINITY
-  const [lng, lat] = point.map(Number)
-  const rad = Math.PI / 180
-  const dLat = (bLat - lat) * rad
-  const dLng = (bLng - lng) * rad
-  const lat1 = lat * rad
-  const lat2 = bLat * rad
-  const h = Math.sin(dLat / 2) ** 2 + Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) ** 2
-  return 6371008.8 * 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h))
-}
-
-const pointInPolygon = (value: unknown, polygon: unknown): boolean => {
-  const point = getPointCoordinates(value)
-  if (!point || !polygon || typeof polygon !== 'object') return false
-  const coordinates = (polygon as { coordinates?: unknown }).coordinates
-  const ring = Array.isArray(coordinates) && Array.isArray(coordinates[0]) ? coordinates[0] as unknown[] : []
-  const [x, y] = point.map(Number)
-  let inside = false
-  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
-    const current = ring[i]
-    const previous = ring[j]
-    if (!Array.isArray(current) || !Array.isArray(previous)) continue
-    const [xi, yi] = current.map(Number)
-    const [xj, yj] = previous.map(Number)
-    const intersect = yi > y !== yj > y && x < ((xj - xi) * (y - yi)) / (yj - yi || Number.EPSILON) + xi
-    if (intersect) inside = !inside
-  }
-  return inside
-}
-
-const matchesOperator = (actual: unknown, operator: string, expected: unknown): boolean => {
+const matchesOperator = (actual: unknown, operator: string, expected: unknown, exactArrayContains = false): boolean => {
   expected = expected === 'null' ? null : expected
   const actualValues = Array.isArray(actual) ? actual : [actual]
   const expectedValues = Array.isArray(expected) ? expected : [expected]
@@ -210,9 +191,11 @@ const matchesOperator = (actual: unknown, operator: string, expected: unknown): 
     case 'contains':
       return Array.isArray(actual)
         ? expectedValues.some((value) => actual.some((item) => (
-            typeof item === 'string' || typeof value === 'string'
-              ? String(item ?? '').toLowerCase().includes(String(value ?? '').toLowerCase())
-              : valuesEqual(item, value)
+            exactArrayContains
+              ? valuesEqual(item, value)
+              : typeof item === 'string' || typeof value === 'string'
+                ? String(item ?? '').toLowerCase().includes(String(value ?? '').toLowerCase())
+                : valuesEqual(item, value)
           )))
         : expectedValues.some((value) => String(actual ?? '').toLowerCase().includes(String(value ?? '').toLowerCase()))
     case 'equals':
@@ -237,11 +220,11 @@ const matchesOperator = (actual: unknown, operator: string, expected: unknown): 
       const text = String(actual ?? '').toLowerCase()
       return String(expected ?? '').split(/\s+/).filter(Boolean).every((word) => text.includes(word.toLowerCase()))
     }
-    case 'not_contains': return !matchesOperator(actual, 'contains', expected)
-    case 'not_equals': return !matchesOperator(actual, 'equals', expected)
-    case 'not_in': return !matchesOperator(actual, 'in', expected)
-    case 'not_like': return !matchesOperator(actual, 'like', expected)
-    default: return matchesOperator(actual, 'equals', expected)
+    case 'not_contains': return !matchesOperator(actual, 'contains', expected, exactArrayContains)
+    case 'not_equals': return !matchesOperator(actual, 'equals', expected, exactArrayContains)
+    case 'not_in': return !matchesOperator(actual, 'in', expected, exactArrayContains)
+    case 'not_like': return !matchesOperator(actual, 'like', expected, exactArrayContains)
+    default: return matchesOperator(actual, 'equals', expected, exactArrayContains)
   }
 }
 
@@ -290,57 +273,18 @@ const docMatchesWhere = (adapter: SurrealAdapter, collection: string, doc: Recor
     const normalizedKey = key.toLowerCase()
     if (normalizedKey === 'and' && Array.isArray(value)) return value.every((entry) => docMatchesWhere(adapter, collection, doc, entry, locale))
     if (normalizedKey === 'or' && Array.isArray(value)) return value.some((entry) => docMatchesWhere(adapter, collection, doc, entry, locale))
+    const exactArrayContains = shouldUseExactArrayContains(adapter, collection, key)
     const path = getVirtualAlias(adapter, collection, key) ?? getLocalizedFieldPath(adapter, collection, key, locale) ?? key.replaceAll('__', '.')
     const actual = resolveLocaleValue(getValueAtPath(doc, path), locale)
     if (value && typeof value === 'object' && !Array.isArray(value)) {
       return Object.entries(value as Record<string, unknown>).every(([operator, expected]) => {
         assertSafeClientQueryValue(key, expected)
-        return matchesOperator(actual, operator, expected)
+        return matchesOperator(actual, operator, expected, exactArrayContains)
       })
     }
     assertSafeClientQueryValue(key, value)
     return actual === value
   })
-}
-
-const getSortSQL = (sort?: string | string[]): string => {
-  const values = sortValues(sort)
-
-  if (!values.length) {
-    return 'ORDER BY createdAt DESC'
-  }
-
-  const parts = values.map((sortValue) => {
-    const direction = sortValue.startsWith('-') ? 'DESC' : 'ASC'
-    const field = sortValue.replace(/^-|^\+/, '')
-
-    return `${field === 'id' ? 'id' : pathToSQL(field)} ${direction}`
-  })
-
-  if (!values.some((value) => value.replace(/^-|^\+/, '') === 'createdAt')) {
-    parts.push('createdAt DESC')
-  }
-
-  return `ORDER BY ${parts.join(', ')}`
-}
-
-const mergeTransactionDocs = (
-  docs: Record<string, unknown>[],
-  transactionDocs: Record<string, unknown>[],
-): Record<string, unknown>[] => {
-  if (!transactionDocs.length) return docs
-  const transactionIDs = new Set(transactionDocs.map((doc) => doc.id))
-
-  return [...docs.filter((doc) => !transactionIDs.has(doc.id)), ...transactionDocs]
-}
-
-const getPagination = (args: Record<string, any>) => {
-  const limit = Number(args.limit ?? 0)
-  const page = Number(args.page ?? 1)
-  const start = Number(args.skip ?? Math.max(page - 1, 0) * (limit > 0 ? limit : 0))
-  const currentPage = args.skip !== undefined && limit > 0 ? Math.floor(start / limit) + 1 : page
-
-  return { currentPage, limit, start }
 }
 
 const mapWriteError = (adapter: SurrealAdapter, collection: string, error: unknown): never => {
@@ -440,6 +384,32 @@ const getLocalizedFieldPath = (adapter: SurrealAdapter, collection: string, path
 const pathRootField = (adapter: SurrealAdapter, collection: string, path: string): any => {
   const root = path.replaceAll('__', '.').split('.')[0]
   return getCollectionConfig(adapter, collection)?.fields?.find((item: { name?: string }) => item.name === root)
+}
+
+const pathContainsJoinField = (adapter: SurrealAdapter, collection: string, path: string): boolean => {
+  const parts = path.replaceAll('__', '.').split('.').filter(Boolean)
+  let fields = getCollectionConfig(adapter, collection)?.fields ?? []
+
+  for (const part of parts) {
+    const field = fields.find((item: { name?: string }) => item.name === part) as any
+    if (!field) return false
+    if (field.type === 'join') return true
+
+    if (field.type === 'tabs') fields = (field.tabs ?? []).flatMap((tab: any) => tab.fields ?? [])
+    else if (field.type === 'blocks') fields = (field.blocks ?? []).flatMap((block: any) => block.fields ?? [])
+    else fields = field.fields ?? []
+  }
+
+  return false
+}
+
+const whereUsesJoinField = (adapter: SurrealAdapter, collection: string, where: unknown): boolean => {
+  if (!where || typeof where !== 'object' || Array.isArray(where)) return false
+  return Object.entries(where as Record<string, unknown>).some(([key, value]) => {
+    const normalizedKey = key.toLowerCase()
+    if ((normalizedKey === 'and' || normalizedKey === 'or') && Array.isArray(value)) return value.some((entry) => whereUsesJoinField(adapter, collection, entry))
+    return pathContainsJoinField(adapter, collection, key)
+  })
 }
 
 const whereUsesLocalizedFields = (adapter: SurrealAdapter, collection: string, where: unknown): boolean => {
@@ -599,8 +569,6 @@ const getDepth = (args: Record<string, unknown>): number => {
   return 0
 }
 
-const valuesEqual = (a: unknown, b: unknown): boolean => JSON.stringify(normalizeComparableValue(a)) === JSON.stringify(normalizeComparableValue(b))
-
 const appendUnique = (target: unknown[], value: unknown): unknown[] => {
   const values = Array.isArray(value) ? value : [value]
   const next = [...target]
@@ -618,58 +586,6 @@ const removeValues = (target: unknown[], value: unknown): unknown[] => {
   const values = Array.isArray(value) ? value : [value]
 
   return target.filter((item) => !values.some((remove) => valuesEqual(remove, item)))
-}
-
-const getAtomicValueAtPath = (doc: Record<string, unknown>, path: string): unknown => {
-  if (path === 'id') {
-    return doc.id
-  }
-
-  return path.split('.').reduce<unknown>((value, part) => {
-    if (Array.isArray(value)) {
-      const index = Number(part)
-
-      return Number.isInteger(index) ? value[index] : undefined
-    }
-
-    if (value && typeof value === 'object') {
-      return (value as Record<string, unknown>)[part]
-    }
-
-    return undefined
-  }, doc)
-}
-
-const setAtomicValueAtPath = (doc: Record<string, unknown>, path: string, value: unknown): void => {
-  const parts = path.split('.')
-  let target: unknown = doc
-
-  for (const [index, part] of parts.entries()) {
-    if (!target || typeof target !== 'object') {
-      return
-    }
-
-    if (index === parts.length - 1) {
-      if (Array.isArray(target)) {
-        const arrayIndex = Number(part)
-        if (Number.isInteger(arrayIndex)) target[arrayIndex] = value
-      } else {
-        ;(target as Record<string, unknown>)[part] = value
-      }
-
-      return
-    }
-
-    if (Array.isArray(target)) {
-      target = target[Number(part)]
-    } else {
-      const objectTarget = target as Record<string, unknown>
-      if (!objectTarget[part] || typeof objectTarget[part] !== 'object') {
-        objectTarget[part] = {}
-      }
-      target = objectTarget[part]
-    }
-  }
 }
 
 const collectUniqueFieldIndexes = (fields: any[] = [], prefix = ''): Array<{ fields: string[]; unique: true }> => fields.flatMap((field) => {
@@ -871,16 +787,6 @@ const isRepublishingExistingLocaleOnly = (existing: Record<string, unknown>, dat
   return true
 }
 
-const removeDottedOperatorKeys = (data: Record<string, unknown>): Record<string, unknown> => {
-  for (const [key, value] of Object.entries(data)) {
-    if (key.includes('.') && value && typeof value === 'object') {
-      delete data[key]
-    }
-  }
-
-  return data
-}
-
 const buildAtomicSetSQL = (_adapter: SurrealAdapter, _collection: string, data: Record<string, unknown>): string | null => {
   const assignments: string[] = []
   let hasAtomic = false
@@ -989,7 +895,7 @@ export const create: Create = async function create(this: SurrealAdapter, args) 
       const customIDType = (this.payload as any)?.collections?.[args.collection]?.customIDType ?? (collectionConfig as { customIDType?: string } | undefined)?.customIDType
       docs[0].id = (idField?.type === 'number' || customIDType === 'number' || args.collection.endsWith('-number')) && !Number.isNaN(Number(resolvedID)) ? Number(resolvedID) : resolvedID
     }
-    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
+    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never, args.locale)
 
     return shouldReturn ? applySelect(populated[0] ?? null, args.select) : null
   } catch (error) {
@@ -1008,8 +914,14 @@ export const findOne: FindOne = (async function findOne(this: SurrealAdapter, ar
 
   try {
     const result = await this.client.query<Record<string, unknown>[]>(`SELECT * FROM ${table} ${where} LIMIT 1;`)
-    const docs = applyReadTransforms(this, args.collection, normalizeDocs(result) as Record<string, unknown>[], args.locale, !(args as Record<string, unknown>).draftsEnabled)
-    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
+    const transactionDocs = await getTransactionDocs(this, args.req, args.collection)
+    const deletedIDs = await getTransactionDeletedIDs(this, args.req, args.collection)
+    const mergedDocs = mergeTransactionDocs(normalizeDocs(result) as Record<string, unknown>[], transactionDocs, deletedIDs)
+    const matchingDocs = transactionDocs.length
+      ? mergedDocs.filter((doc) => docMatchesWhere(this, args.collection, doc, args.where, args.locale)).slice(0, 1)
+      : mergedDocs
+    const docs = applyReadTransforms(this, args.collection, matchingDocs, args.locale, !(args as Record<string, unknown>).draftsEnabled)
+    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never, args.locale)
 
     return applySelect(populated[0] ?? null, args.select)
   } catch (error) {
@@ -1023,6 +935,30 @@ export const findOne: FindOne = (async function findOne(this: SurrealAdapter, ar
 
 export const find: Find = async function find(this: SurrealAdapter, args) {
   const table = escapeIdent(getTableName(args.collection, this.tablePrefix))
+
+  if (
+    args.collection === 'payload-jobs' &&
+    args.limit === 0 &&
+    (args as Record<string, unknown>).pagination === false &&
+    (args.select as Record<string, unknown> | undefined)?.concurrencyKey === true &&
+    JSON.stringify(args.where ?? {}).includes('processing') &&
+    JSON.stringify(args.where ?? {}).includes('concurrencyKey')
+  ) {
+    const docs = await this.client.query<Record<string, unknown>[]>(`SELECT concurrencyKey FROM ${table} WHERE processing = true AND concurrencyKey != NONE AND concurrencyKey != NULL;`)
+    return {
+      docs: normalizeDocs(docs) as Record<string, unknown>[],
+      hasNextPage: false,
+      hasPrevPage: false,
+      limit: 0,
+      nextPage: null,
+      page: 1,
+      pagingCounter: docs.length > 0 ? 1 : 0,
+      prevPage: null,
+      totalDocs: docs.length,
+      totalPages: 1,
+    } as never
+  }
+
   const pagination = getPagination(args)
   const maxLimit = getCollectionConfig(this, args.collection)?.maxLimit as number | undefined
   const limit = pagination.limit === 0 && maxLimit ? maxLimit : pagination.limit
@@ -1049,13 +985,18 @@ export const find: Find = async function find(this: SurrealAdapter, args) {
 
   const needsClientVirtualHandling = useClientVirtuals || useClientSort
   const transactionDocs = await getTransactionDocs(this, args.req, args.collection)
-  const mergedDocs = mergeTransactionDocs(normalizeDocs(docs) as Record<string, unknown>[], transactionDocs)
-  const baseDocs = applyReadTransforms(this, args.collection, mergedDocs, needsClientVirtualHandling ? 'all' : args.locale, !(args as Record<string, unknown>).draftsEnabled)
+  const deletedIDs = await getTransactionDeletedIDs(this, args.req, args.collection)
+  const mergedDocs = mergeTransactionDocs(normalizeDocs(docs) as Record<string, unknown>[], transactionDocs, deletedIDs)
+  const visibleDocs = (transactionDocs.length || deletedIDs.length) && !needsClientVirtualHandling
+    ? mergedDocs.filter((doc) => docMatchesWhere(this, args.collection, doc, args.where, args.locale))
+    : mergedDocs
+  const baseDocs = applyReadTransforms(this, args.collection, visibleDocs, needsClientVirtualHandling ? 'all' : args.locale, !(args as Record<string, unknown>).draftsEnabled)
   let normalized = needsClientVirtualHandling
     ? baseDocs
-    : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
+    : await transformRelationshipReads(this, args.collection, baseDocs, getDepth(args as never), (args as Record<string, unknown>).joins as never, args.locale)
+  const clientVirtualDepth = whereUsesJoinField(this, args.collection, args.where) ? 1 : 3
   let workingDocs = needsClientVirtualHandling
-    ? await transformRelationshipReads(this, args.collection, structuredClone(baseDocs), Math.max(getDepth(args as never), 5), (args as Record<string, unknown>).joins as never)
+    ? await transformRelationshipReads(this, args.collection, structuredClone(baseDocs), Math.max(getDepth(args as never), clientVirtualDepth), (args as Record<string, unknown>).joins as never, args.locale)
     : normalized
   let workingIndexes = workingDocs.map((_, index) => index)
 
@@ -1113,6 +1054,23 @@ export const count: Count = async function count(this: SurrealAdapter, args) {
   const table = escapeIdent(getTableName(args.collection, this.tablePrefix))
   const where = buildRelationshipAwareWhere(this, args.collection, args.where)
 
+  const transactionDocs = await getTransactionDocs(this, args.req, args.collection)
+  const deletedIDs = await getTransactionDeletedIDs(this, args.req, args.collection)
+
+  if (transactionDocs.length || deletedIDs.length) {
+    try {
+      const result = await this.client.query<Record<string, unknown>[]>(`SELECT * FROM ${table} ${where};`)
+      const mergedDocs = mergeTransactionDocs(normalizeDocs(result) as Record<string, unknown>[], transactionDocs, deletedIDs)
+      return { totalDocs: mergedDocs.filter((doc) => docMatchesWhere(this, args.collection, doc, args.where, args.locale)).length }
+    } catch (error) {
+      if (isMissingTableError(error)) {
+        return { totalDocs: transactionDocs.filter((doc) => docMatchesWhere(this, args.collection, doc, args.where, args.locale)).length }
+      }
+
+      throw error
+    }
+  }
+
   try {
     const result = await this.client.query(
       `SELECT count() AS count FROM ${table} ${where} GROUP ALL;`,
@@ -1129,10 +1087,16 @@ export const count: Count = async function count(this: SurrealAdapter, args) {
 }
 
 export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapter, args) {
+  if (args.collection === 'payload-jobs' && args.id && !(args as Record<string, unknown>).__payloadJobUpdateLock) {
+    return withPayloadJobUpdateLock(String(args.id), () => updateOne.call(this, { ...args, __payloadJobUpdateLock: true } as never)) as never
+  }
+
   const collectionConfig = getCollectionConfig(this, args.collection)
   const table = getTableName(args.collection, this.tablePrefix)
   const dottedData = Object.fromEntries(Object.entries(args.data).filter(([key]) => key.includes('.')))
-  let data = transformRelationshipWrites(applyDefaults({ ...args.data }, collectionConfig?.fields, { locale: args.locale, req: args.req, user: args.req?.user }), collectionConfig?.fields)
+  let data = transformRelationshipWrites(args.collection === 'payload-jobs'
+    ? { ...args.data }
+    : applyDefaults({ ...args.data }, collectionConfig?.fields, { locale: args.locale, req: args.req, user: args.req?.user }), collectionConfig?.fields)
   Object.assign(data, dottedData)
   const shouldReturn = args.returning !== false
 
@@ -1164,14 +1128,23 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
     if (atomicSet && Object.keys(dottedData).length === 0) {
       const statement = `UPDATE ${getRecordID(table, args.id)} ${atomicSet} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
 
+      const transactionDocs = await getTransactionDocs(this, args.req, args.collection)
+      const transactionDoc = transactionDocs.find((doc) => String(doc.id) === String(args.id))
+      const existing = transactionDoc ? [] : await this.client.query<Record<string, unknown>[]>(`SELECT * FROM ${getRecordID(table, args.id)};`)
+      const existingDoc = transactionDoc ?? normalizeDocument(existing[0]) ?? { id: args.id }
+
       if (await queueTransactionStatement(this, args.req, statement)) {
-        return shouldReturn ? null : null
+        const snapshotData = removeDottedOperatorKeys(applyAtomicUpdate(data, existingDoc))
+        const snapshot = normalizeDocument({ ...existingDoc, ...snapshotData, id: args.id }) as Record<string, unknown>
+        await addTransactionDoc(this, args.req, args.collection, snapshot)
+        const docs = applyReadTransforms(this, args.collection, [snapshot], args.locale)
+        return shouldReturn ? applySelect(docs[0] ?? null, args.select) : null
       }
 
       try {
         const result = await this.client.query<Record<string, unknown>[]>(statement)
         const docs = applyReadTransforms(this, args.collection, normalizeDocs(result) as Record<string, unknown>[], args.locale)
-        const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
+        const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never, args.locale)
 
         return shouldReturn ? applySelect(populated[0] ?? null, args.select) : null
       } catch (error) {
@@ -1179,8 +1152,10 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
       }
     }
 
-    const existing = await this.client.query<Record<string, unknown>[]>(`SELECT * FROM ${getRecordID(table, args.id)};`)
-    const existingDoc = normalizeDocument(existing[0]) ?? { id: args.id }
+    const transactionDocs = await getTransactionDocs(this, args.req, args.collection)
+    const transactionDoc = transactionDocs.find((doc) => String(doc.id) === String(args.id))
+    const existing = transactionDoc ? [] : await this.client.query<Record<string, unknown>[]>(`SELECT * FROM ${getRecordID(table, args.id)};`)
+    const existingDoc = transactionDoc ?? normalizeDocument(existing[0]) ?? { id: args.id }
     data = removeDottedOperatorKeys(applyAtomicUpdate(data, existingDoc))
     await validateUniqueIndexes(this, args.collection, data, args.id)
 
@@ -1198,14 +1173,16 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
     const statement = `UPDATE ${getRecordID(table, args.id)} ${shouldUseContent ? 'CONTENT' : 'MERGE'} ${literal(updateContent)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
 
     if (await queueTransactionStatement(this, args.req, statement)) {
-      const docs = applyReadTransforms(this, args.collection, [normalizeDocument({ ...existingDoc, ...data, id: args.id }) as Record<string, unknown>], args.locale)
+      const snapshot = normalizeDocument({ ...existingDoc, ...data, id: args.id }) as Record<string, unknown>
+      await addTransactionDoc(this, args.req, args.collection, snapshot)
+      const docs = applyReadTransforms(this, args.collection, [snapshot], args.locale)
       return shouldReturn ? applySelect(docs[0] ?? null, args.select) : null
     }
 
     try {
       const result = await this.client.query<Record<string, unknown>[]>(statement)
       const docs = applyReadTransforms(this, args.collection, normalizeDocs(result) as Record<string, unknown>[], args.locale)
-      const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
+      const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never, args.locale)
 
       return shouldReturn ? applySelect(populated[0] ?? null, args.select) : null
     } catch (error) {
@@ -1237,14 +1214,16 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
   const statement = `UPDATE ${getRecordID(table, found.id)} ${shouldUseContent ? 'CONTENT' : 'MERGE'} ${literal(updateContent)} RETURN ${shouldReturn ? 'AFTER' : 'NONE'};`
 
   if (await queueTransactionStatement(this, args.req, statement)) {
-    const docs = applyReadTransforms(this, args.collection, [normalizeDocument({ ...found, ...data }) as Record<string, unknown>], args.locale)
+    const snapshot = normalizeDocument({ ...found, ...data }) as Record<string, unknown>
+    await addTransactionDoc(this, args.req, args.collection, snapshot)
+    const docs = applyReadTransforms(this, args.collection, [snapshot], args.locale)
     return shouldReturn ? applySelect(docs[0] ?? null, args.select) : null
   }
 
   try {
     const result = await this.client.query<Record<string, unknown>[]>(statement)
     const docs = applyReadTransforms(this, args.collection, normalizeDocs(result) as Record<string, unknown>[], args.locale)
-    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never)
+    const populated = await transformRelationshipReads(this, args.collection, docs, getDepth(args as never), (args as Record<string, unknown>).joins as never, args.locale)
 
     return shouldReturn ? applySelect(populated[0] ?? null, args.select) : null
   } catch (error) {
@@ -1253,16 +1232,39 @@ export const updateOne: UpdateOne = async function updateOne(this: SurrealAdapte
 }
 
 export const updateMany: UpdateMany = async function updateMany(this: SurrealAdapter, args) {
+  const isPayloadJobClaim = args.collection === 'payload-jobs' && (args.data as Record<string, unknown>).processing === true
+  const table = escapeIdent(getTableName(args.collection, this.tablePrefix))
   const found = await find.call(this, {
     collection: args.collection,
-    limit: args.limit ?? 0,
+    limit: isPayloadJobClaim ? 0 : args.limit ?? 0,
     req: args.req,
     sort: args.sort,
     where: args.where,
   })
+  let docsToUpdate = found.docs as Record<string, unknown>[]
+
+  if (isPayloadJobClaim) {
+    const running = await this.client.query<Array<{ concurrencyKey?: unknown }>>(`SELECT concurrencyKey FROM ${table} WHERE processing = true AND concurrencyKey != NONE AND concurrencyKey != NULL;`)
+    const blockedKeys = new Set(running.map((doc) => String(doc.concurrencyKey)).filter(Boolean))
+    const seenKeys = new Set<string>()
+    const claimable: Record<string, unknown>[] = []
+
+    for (const doc of docsToUpdate) {
+      const key = doc.concurrencyKey ? String(doc.concurrencyKey) : null
+      if (key) {
+        if (blockedKeys.has(key) || seenKeys.has(key)) continue
+        seenKeys.add(key)
+      }
+      claimable.push(doc)
+      if (args.limit && claimable.length >= args.limit) break
+    }
+
+    docsToUpdate = claimable
+  }
+
   const docs = []
 
-  for (const doc of found.docs) {
+  for (const doc of docsToUpdate) {
     docs.push(await updateOne.call(this, { collection: args.collection, data: args.data, id: doc.id, req: args.req, returning: args.returning }))
   }
 
@@ -1278,7 +1280,9 @@ export const deleteOne: DeleteOne = async function deleteOne(this: SurrealAdapte
 
   const statement = `DELETE ${getRecordID(getTableName(args.collection, this.tablePrefix), found.id)};`
 
-  if (!(await queueTransactionStatement(this, args.req, statement))) {
+  if (await queueTransactionStatement(this, args.req, statement)) {
+    await addTransactionDeletedDocs(this, args.req, args.collection, [found])
+  } else {
     await this.client.query(statement)
   }
 
@@ -1286,11 +1290,19 @@ export const deleteOne: DeleteOne = async function deleteOne(this: SurrealAdapte
 }
 
 export const deleteMany: DeleteMany = async function deleteMany(this: SurrealAdapter, args) {
+  if (args.collection === 'payload-jobs' && !(args as Record<string, unknown>).__payloadJobUpdateLock) {
+    return withPayloadJobUpdateLock('__updateJobs__', () => deleteMany.call(this, { ...args, __payloadJobUpdateLock: true } as never)) as never
+  }
+
   const table = escapeIdent(getTableName(args.collection, this.tablePrefix))
   const where = buildRelationshipAwareWhere(this, args.collection, args.where)
   const statement = `DELETE ${table} ${where};`
 
-  if (!(await queueTransactionStatement(this, args.req, statement))) {
+  const queued = await queueTransactionStatement(this, args.req, statement)
+  if (queued) {
+    const matching = await find.call(this, { collection: args.collection, limit: 0, req: args.req, where: args.where })
+    await addTransactionDeletedDocs(this, args.req, args.collection, matching.docs as Record<string, unknown>[])
+  } else {
     await this.client.query(statement)
   }
 }

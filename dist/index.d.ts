@@ -22,6 +22,7 @@ export type SurrealAdapter = BaseDatabaseAdapter & Required<Pick<SurrealAdapterA
 };
 declare const execute: (this: SurrealAdapter, args: {
     raw?: string;
+    sql?: unknown;
 }) => Promise<{
     rows: {
         extra_column: number;

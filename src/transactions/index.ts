@@ -2,8 +2,11 @@ import type { BeginTransaction, CommitTransaction, RollbackTransaction } from 'p
 
 import type { SurrealAdapter } from '../index.js'
 
+import { releasePayloadJobUpdateLocksForTransaction } from '../jobs/updateLock.js'
+
 export type SurrealTransactionSession = {
   createdAt: number
+  deletedIDs?: Record<string, Array<number | string>>
   docs?: Record<string, Record<string, unknown>[]>
   statements: string[]
 }
@@ -67,10 +70,36 @@ export const addTransactionDoc = async (
   const snapshot = typeof structuredClone === 'function'
     ? structuredClone(doc)
     : JSON.parse(JSON.stringify(doc))
+  transaction.deletedIDs ??= {}
+  transaction.deletedIDs[collection] = (transaction.deletedIDs[collection] ?? []).filter((id) => id !== snapshot.id)
   transaction.docs[collection] = [
     ...(transaction.docs[collection] ?? []).filter((existing) => existing.id !== snapshot.id),
     snapshot,
   ]
+}
+
+export const addTransactionDeletedDocs = async (
+  adapter: SurrealAdapter,
+  req: { transactionID?: Promise<number | string | null> | number | string | null } | undefined,
+  collection: string,
+  docs: Record<string, unknown>[],
+): Promise<void> => {
+  const transaction = await getTransaction(adapter, req)
+  if (!transaction || !docs.length) return
+  transaction.deletedIDs ??= {}
+  const deleted = new Set([...(transaction.deletedIDs[collection] ?? []), ...docs.map((doc) => doc.id as number | string).filter((id) => id !== undefined)])
+  transaction.deletedIDs[collection] = [...deleted]
+  transaction.docs ??= {}
+  transaction.docs[collection] = (transaction.docs[collection] ?? []).filter((doc) => !deleted.has(doc.id as number | string))
+}
+
+export const getTransactionDeletedIDs = async (
+  adapter: SurrealAdapter,
+  req: { transactionID?: Promise<number | string | null> | number | string | null } | undefined,
+  collection: string,
+): Promise<Array<number | string>> => {
+  const transaction = await getTransaction(adapter, req)
+  return transaction?.deletedIDs?.[collection] ?? []
 }
 
 export const getTransactionDocs = async (
@@ -108,11 +137,15 @@ export const commitTransaction: CommitTransaction = async function commitTransac
 
   delete sessions![transactionID]
 
-  if (transaction.statements.length === 0) {
-    return
-  }
+  try {
+    if (transaction.statements.length === 0) {
+      return
+    }
 
-  await this.client.query(`BEGIN TRANSACTION;\n${transaction.statements.join('\n')}\nCOMMIT TRANSACTION;`)
+    await this.client.query(`BEGIN TRANSACTION;\n${transaction.statements.join('\n')}\nCOMMIT TRANSACTION;`)
+  } finally {
+    releasePayloadJobUpdateLocksForTransaction(transactionID)
+  }
 }
 
 export const rollbackTransaction: RollbackTransaction = async function rollbackTransaction(this: SurrealAdapter, incomingID = '') {
@@ -120,8 +153,10 @@ export const rollbackTransaction: RollbackTransaction = async function rollbackT
   const sessions = this.sessions as unknown as Record<string, SurrealTransactionSession> | undefined
 
   if (!sessions?.[transactionID]) {
+    releasePayloadJobUpdateLocksForTransaction(transactionID)
     return
   }
 
   delete sessions[transactionID]
+  releasePayloadJobUpdateLocksForTransaction(transactionID)
 }

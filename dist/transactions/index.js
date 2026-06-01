@@ -1,3 +1,4 @@
+import { releasePayloadJobUpdateLocksForTransaction } from '../jobs/updateLock.js';
 const randomID = () => {
     const crypto = globalThis.crypto;
     return crypto?.randomUUID?.() ?? `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
@@ -33,10 +34,26 @@ export const addTransactionDoc = async (adapter, req, collection, doc) => {
     const snapshot = typeof structuredClone === 'function'
         ? structuredClone(doc)
         : JSON.parse(JSON.stringify(doc));
+    transaction.deletedIDs ??= {};
+    transaction.deletedIDs[collection] = (transaction.deletedIDs[collection] ?? []).filter((id) => id !== snapshot.id);
     transaction.docs[collection] = [
         ...(transaction.docs[collection] ?? []).filter((existing) => existing.id !== snapshot.id),
         snapshot,
     ];
+};
+export const addTransactionDeletedDocs = async (adapter, req, collection, docs) => {
+    const transaction = await getTransaction(adapter, req);
+    if (!transaction || !docs.length)
+        return;
+    transaction.deletedIDs ??= {};
+    const deleted = new Set([...(transaction.deletedIDs[collection] ?? []), ...docs.map((doc) => doc.id).filter((id) => id !== undefined)]);
+    transaction.deletedIDs[collection] = [...deleted];
+    transaction.docs ??= {};
+    transaction.docs[collection] = (transaction.docs[collection] ?? []).filter((doc) => !deleted.has(doc.id));
+};
+export const getTransactionDeletedIDs = async (adapter, req, collection) => {
+    const transaction = await getTransaction(adapter, req);
+    return transaction?.deletedIDs?.[collection] ?? [];
 };
 export const getTransactionDocs = async (adapter, req, collection) => {
     const transaction = await getTransaction(adapter, req);
@@ -62,16 +79,23 @@ export const commitTransaction = async function commitTransaction(incomingID = '
         return;
     }
     delete sessions[transactionID];
-    if (transaction.statements.length === 0) {
-        return;
+    try {
+        if (transaction.statements.length === 0) {
+            return;
+        }
+        await this.client.query(`BEGIN TRANSACTION;\n${transaction.statements.join('\n')}\nCOMMIT TRANSACTION;`);
     }
-    await this.client.query(`BEGIN TRANSACTION;\n${transaction.statements.join('\n')}\nCOMMIT TRANSACTION;`);
+    finally {
+        releasePayloadJobUpdateLocksForTransaction(transactionID);
+    }
 };
 export const rollbackTransaction = async function rollbackTransaction(incomingID = '') {
     const transactionID = String(await incomingID);
     const sessions = this.sessions;
     if (!sessions?.[transactionID]) {
+        releasePayloadJobUpdateLocksForTransaction(transactionID);
         return;
     }
     delete sessions[transactionID];
+    releasePayloadJobUpdateLocksForTransaction(transactionID);
 };

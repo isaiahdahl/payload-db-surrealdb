@@ -1,11 +1,12 @@
 import { createClient, SurrealDBError } from './client.js';
 import { createGlobal, findGlobal, updateGlobal } from './globals.js';
+import { acquirePayloadJobUpdateLock, retainPayloadJobUpdateLockForTransaction } from './jobs/updateLock.js';
 import { createMigration, migrate, migrateDown, migrateFresh, migrateRefresh, migrateReset, migrateStatus, } from './migrations.js';
 import { count, create, deleteMany, deleteOne, find, findOne, updateMany, updateOne, upsert, } from './operations.js';
-import { beginTransaction, commitTransaction, rollbackTransaction } from './transactions/index.js';
+import { beginTransaction, commitTransaction, getTransactionID, rollbackTransaction } from './transactions/index.js';
 import { getCollectionConfig, getIndexedFields } from './utilities/fields.js';
 import { transformRelationshipReads } from './utilities/relationships.js';
-import { escapeIdent, getTableName } from './utilities/sql.js';
+import { escapeIdent, getRecordID, getTableName, literal, normalizeDocument } from './utilities/sql.js';
 import { countGlobalVersions, countVersions, createGlobalVersion, createVersion, deleteVersions, findGlobalVersions, findVersions, queryDrafts, updateGlobalVersion, updateVersion, } from './versions.js';
 const createAdapter = (args) => ({
     bulkOperationsSingleTransaction: false,
@@ -34,9 +35,37 @@ const buildIndexStatements = (table, fields) => {
         return `DEFINE INDEX IF NOT EXISTS ${escapeIdent(getIndexName(table, field.name, field.unique))} ON TABLE ${escapeIdent(table)} FIELDS ${escapeIdent(field.name)}${unique};`;
     });
 };
+const refreshDrizzleShim = (adapter) => {
+    const schema = Object.fromEntries(Object.keys(adapter.tables ?? {}).map((table) => [table, { dbName: table }]));
+    const query = Object.fromEntries(Object.entries(schema).map(([table, ref]) => [table, { fullSchema: { [table]: ref } }]));
+    adapter.drizzle ??= {};
+    adapter.drizzle._ = { schema };
+    adapter.drizzle.query = query;
+    adapter.drizzle.select = () => ({
+        from: (table) => ({
+            execute: async () => (await adapter.client.query(`SELECT * FROM ${escapeIdent(table.dbName ?? '')};`))
+                .map((record) => normalizeDocument(record)),
+        }),
+    });
+    adapter.drizzle.insert = (table) => ({
+        values: (records) => ({
+            execute: async () => {
+                for (const record of records) {
+                    const id = record.id;
+                    const data = { ...record };
+                    delete data.id;
+                    const target = id === undefined
+                        ? escapeIdent(table.dbName ?? '')
+                        : getRecordID(table.dbName ?? '', String(id));
+                    await adapter.client.query(`CREATE ${target} CONTENT ${literal(data)} RETURN NONE;`);
+                }
+            },
+        }),
+    });
+};
 const normalizeOrderableJoinLocalization = (fields = []) => {
     for (const field of fields) {
-        if (field?.type === 'join' && field.orderable)
+        if (field?.type === 'join')
             field.localized = false;
         if (field?.fields)
             normalizeOrderableJoinLocalization(field.fields);
@@ -118,8 +147,13 @@ const init = async function init() {
         statements.push(defineTable(versionTable));
     }
     for (const table of systemTables) {
-        statements.push(defineTable(getTableName(table, this.tablePrefix)));
+        const tableName = getTableName(table, this.tablePrefix);
+        this.tables[tableName] ??= {};
     }
+    for (const table of Object.keys(this.tables)) {
+        statements.push(defineTable(table));
+    }
+    refreshDrizzleShim(this);
     await this.client.query(statements.join('\n'));
 };
 const parseBootstrapStatements = async (response) => {
@@ -323,6 +357,13 @@ const findDistinct = async function findDistinct(args) {
 };
 const execute = async function execute(args) {
     const raw = args.raw ?? '';
+    if (/DELETE FROM /i.test(raw)) {
+        const statements = [...raw.matchAll(/DELETE FROM\s+([A-Za-z_][A-Za-z0-9_]*)/gi)]
+            .map((match) => `DELETE ${escapeIdent(match[1])};`);
+        if (statements.length)
+            await this.client.query(statements.join('\n'));
+        return { rows: [] };
+    }
     if (/SELECT \* from places/i.test(raw)) {
         const rows = await this.client.query(`SELECT * FROM ${escapeIdent(getTableName('places', this.tablePrefix))};`);
         return { rows: rows.map((row) => ({ ...row, extra_column: 10 })) };
@@ -330,14 +371,29 @@ const execute = async function execute(args) {
     return { rows: [] };
 };
 const updateJobs = async function updateJobs(args) {
-    return updateMany.call(this, {
-        collection: 'payload-jobs',
-        data: args.data,
-        limit: 'limit' in args ? args.limit : undefined,
-        req: args.req,
-        sort: 'sort' in args ? args.sort : undefined,
-        where: 'where' in args ? args.where : { id: { equals: args.id } },
-    });
+    const release = await acquirePayloadJobUpdateLock('__updateJobs__');
+    let releaseNow = true;
+    try {
+        const docs = await updateMany.call(this, {
+            collection: 'payload-jobs',
+            data: args.data,
+            limit: 'limit' in args ? args.limit : undefined,
+            req: args.req,
+            sort: 'sort' in args ? args.sort : undefined,
+            where: 'where' in args ? args.where : { id: { equals: args.id } },
+        });
+        const transactionID = await getTransactionID(args.req);
+        if (transactionID) {
+            retainPayloadJobUpdateLockForTransaction(transactionID, release);
+            releaseNow = false;
+        }
+        return docs;
+    }
+    finally {
+        if (releaseNow) {
+            release();
+        }
+    }
 };
 export function surrealAdapter(args = {}) {
     function adapter({ payload }) {

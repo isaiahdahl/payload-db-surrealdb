@@ -154,6 +154,9 @@ export const getValueAtPath = (doc, path) => {
     }
     const getValue = (value, parts) => {
         if (!parts.length) {
+            if (value && typeof value === 'object' && !Array.isArray(value) && Array.isArray(value.docs)) {
+                return value.docs;
+            }
             return value;
         }
         if (Array.isArray(value)) {
@@ -170,6 +173,9 @@ export const getValueAtPath = (doc, path) => {
             const objectValue = value;
             if (part in objectValue) {
                 return getValue(objectValue[part], rest);
+            }
+            if (Array.isArray(objectValue.docs)) {
+                return getValue(objectValue.docs, parts);
             }
             if (typeof objectValue.relationTo === 'string' && objectValue.value && typeof objectValue.value === 'object') {
                 return getValue(objectValue.value, parts);
